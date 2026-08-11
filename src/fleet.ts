@@ -107,8 +107,21 @@ export interface FleetModel {
   name: string;
   sizeGB: number;
   hosts: string[];
-  /** Native tool/function calling, from /api/show capabilities. */
+  /** Ollama /api/show reports the "tools" capability. CLAIMED, not proven. */
   tools: boolean;
+  /**
+   * Empirically confirmed to emit STRUCTURED message.tool_calls on /api/chat.
+   *
+   * This is deliberately separate from `tools`. Tested 2026-08-11 with a
+   * get_weather function schema:
+   *   qwen3:30b-a3b  -> tool_calls: [{function:{name:"get_weather",arguments:{city:"Paris"}}}]  PASS
+   *   qwen3:8b       -> same, PASS
+   *   qwen2.5-coder:32b -> tool_calls NONE; emitted the call as plain text in
+   *                        message.content: '{"name":"get_weather","arguments":{"city":"Paris"}}'
+   *                        i.e. it ADVERTISES tools and does not deliver them.
+   * Only route agentic work to models where this is true.
+   */
+  toolsVerified?: boolean;
   good: TaskClass[];
 }
 
@@ -116,17 +129,23 @@ export const MODELS: FleetModel[] = [
   // ---- orch01 only (need real VRAM) ----
   { name: "qwen2.5:72b",                      sizeGB: 47.4, hosts: ["orch01"], tools: true,  good: ["reason"] },
   { name: "llama3.1:70b",                     sizeGB: 42.5, hosts: ["orch01"], tools: true,  good: ["reason"] },
-  { name: "qwen2.5-coder:32b-instruct-q4_K_M",sizeGB: 19.9, hosts: ["orch01"], tools: true,  good: ["code-review", "draft", "agentic"] },
+  // NOTE: coder:32b advertises tools but does NOT emit structured tool_calls — see
+  // toolsVerified doc above. Kept for code-review/draft, removed from agentic.
+  { name: "qwen2.5-coder:32b-instruct-q4_K_M",sizeGB: 19.9, hosts: ["orch01"], tools: true,  toolsVerified: false, good: ["code-review", "draft"] },
   { name: "qwen2.5:32b",                      sizeGB: 19.9, hosts: ["orch01"], tools: true,  good: ["reason", "summarize"] },
-  { name: "qwen3:30b-a3b",                    sizeGB: 18.6, hosts: ["orch01"], tools: true,  good: ["agentic", "reason"] },
+  { name: "qwen3:30b-a3b",                    sizeGB: 18.6, hosts: ["orch01"], tools: true,  toolsVerified: true, good: ["agentic", "reason"] },
   { name: "gemma2:27b-instruct-q4_K_M",       sizeGB: 16.6, hosts: ["orch01"], tools: false, good: ["summarize", "draft"] },
   { name: "codestral:22b",                    sizeGB: 12.6, hosts: ["orch01"], tools: false, good: ["draft"] },
   { name: "deepseek-coder-v2:16b",            sizeGB: 8.9,  hosts: ["orch01"], tools: false, good: ["code-review", "draft"] },
 
   // ---- small, spread across boxes ----
+  // Pulled 2026-08-11 on Grok's placement advice, then verified serving.
+  { name: "qwen3:8b",                         sizeGB: 5.2,  hosts: ["orch02"], tools: true,  toolsVerified: true, good: ["agentic", "reason", "summarize"] },
+  { name: "qwen2.5:14b",                      sizeGB: 9.0,  hosts: ["nas", "orch02"], tools: true, good: ["summarize", "reason", "classify"] },
+  { name: "qwen2.5-coder:7b",                 sizeGB: 4.7,  hosts: ["nas", "orch02"], tools: true, good: ["draft", "classify"] },
+
   { name: "qwen2.5-coder:14b",                sizeGB: 9.0,  hosts: ["orch02"], tools: true,  good: ["code-review", "draft"] },
   { name: "qwen2.5-coder:7b-instruct-q4_K_M", sizeGB: 4.7,  hosts: ["orch01"], tools: true,  good: ["draft", "classify"] },
-  { name: "qwen2.5-coder:7b",                 sizeGB: 4.7,  hosts: ["orch02"], tools: true,  good: ["draft", "classify"] },
   { name: "qwen2.5:7b",                       sizeGB: 4.7,  hosts: ["nas", "orch02"], tools: true, good: ["classify", "summarize"] },
   { name: "llama3.2:3b",                      sizeGB: 2.0,  hosts: ["orch02"], tools: true,  good: ["classify"] },
 
@@ -232,9 +251,15 @@ export function route(task: TaskClass, opts: RouteOpts = {}): RouteResult {
 
   type Cand = { m: FleetModel; h: FleetHost };
   const cands: Cand[] = [];
+  // For agentic work require PROVEN structured tool_calls, not the advertised
+  // capability — qwen2.5-coder:32b advertises tools and returns the call as plain
+  // text, which silently breaks any tool loop.
+  const toolOk = (m: FleetModel) =>
+    !needsTools || (task === "agentic" ? m.toolsVerified === true : m.tools);
+
   for (const m of MODELS) {
     if (!m.good.includes(task)) continue;
-    if (needsTools && !m.tools) continue;
+    if (!toolOk(m)) continue;
     for (const hid of m.hosts) {
       const h = FLEET[hid];
       if (h && eligible(m, h)) cands.push({ m, h });
@@ -244,7 +269,7 @@ export function route(task: TaskClass, opts: RouteOpts = {}): RouteResult {
   // Widen: any tool-satisfying model anywhere, ignoring task fit.
   if (cands.length === 0) {
     for (const m of MODELS) {
-      if (needsTools && !m.tools) continue;
+      if (!toolOk(m)) continue;
       if (m.good.includes("embed") !== (task === "embed")) continue;
       for (const hid of m.hosts) {
         const h = FLEET[hid];
