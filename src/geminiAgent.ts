@@ -4,6 +4,7 @@ import { once } from "node:events";
 export interface GeminiInvocationOptions {
   prompt: string;
   agentSystemPrompt?: string;
+  model?: string;
   timeoutMs?: number;
   workingDirectory?: string;
   includeRawEvents?: boolean;
@@ -33,6 +34,9 @@ export class GeminiInvocationError extends Error {
 }
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const MIN_TIMEOUT_MS = 40000; // 40 seconds minimum to handle cold starts
+const MAX_RETRIES = 2; // Retry up to 2 times on timeout
+const RETRY_DELAY_MS = 2000; // 2 second delay between retries
 
 const META_INSTRUCTION = `You are an MCP-invoked agent. Your responses should be:
 - Concise but complete
@@ -62,9 +66,27 @@ function buildArgs(options: GeminiInvocationOptions): string[] {
   // Add YOLO mode for automatic approval of all actions
   args.push("-y");  // or "--yolo"
 
-  // Note: model parameter removed as it's not reliably supported
+  // Model selection: gemini-2.5-flash (default), gemini-2.5-flash-lite (worker/min),
+  // gemini-2.5-pro (planner/max, quota-limited). gemini CLI 0.18.4.
+  //
+  // 2026-08-11 observed: gemini-2.5-flash executed a real shell command correctly, then
+  // hit "You have exhausted your daily quota on this model" ~7 minutes later. Treat
+  // Gemini as BEST-EFFORT — always have a fallback provider for anything load-bearing.
+  //
+  // Also observed: the CLI warns "Both GOOGLE_API_KEY and GEMINI_API_KEY are set. Using
+  // GOOGLE_API_KEY." Unset one so the credential in use is unambiguous.
+  //
+  // CAUTION: this agent runs with -y (YOLO) and auto-approves every action, and unlike
+  // grok/codex it returns no tool-call trace, so its actions cannot be audited after the
+  // fact. Do not give it tasks that can mutate production.
+  const model = options.model || "gemini-2.5-flash";
+  args.push("-m", model);
 
   return args;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function parseGeminiResponse(stdout: string): { response: string; stats?: any } {
@@ -106,11 +128,13 @@ function parseGeminiResponse(stdout: string): { response: string; stats?: any } 
   };
 }
 
-export async function invokeGemini(options: GeminiInvocationOptions): Promise<GeminiInvocationResponse> {
+async function invokeGeminiOnce(options: GeminiInvocationOptions, effectiveTimeoutMs: number): Promise<GeminiInvocationResponse> {
   const args = buildArgs(options);
   const start = Date.now();
 
-  const child = spawn("gemini", args, {
+  // Use full path to gemini CLI to ensure it's found regardless of PATH
+  const geminiPath = process.env.GEMINI_PATH || "/usr/local/bin/gemini";
+  const child = spawn(geminiPath, args, {
     cwd: options.workingDirectory ?? process.cwd(),
     env: process.env,
     stdio: ["pipe", "pipe", "pipe"]
@@ -125,19 +149,17 @@ export async function invokeGemini(options: GeminiInvocationOptions): Promise<Ge
   // Gemini doesn't use stdin for prompts
   child.stdin.end();
 
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-
   let timeoutHandle: NodeJS.Timeout | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutHandle = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new GeminiInvocationError(
-        `Gemini invocation timed out after ${timeoutMs}ms`,
+        `Gemini invocation timed out after ${effectiveTimeoutMs}ms`,
         -1,
         Buffer.concat(stdoutChunks).toString("utf8"),
         Buffer.concat(stderrChunks).toString("utf8")
       ));
-    }, timeoutMs);
+    }, effectiveTimeoutMs);
   });
 
   let closeResult: [number | null, NodeJS.Signals | null];
@@ -174,4 +196,40 @@ export async function invokeGemini(options: GeminiInvocationOptions): Promise<Ge
     response: parsed.response,
     stats: parsed.stats
   };
+}
+
+export async function invokeGemini(options: GeminiInvocationOptions): Promise<GeminiInvocationResponse> {
+  // Ensure minimum timeout to handle cold starts
+  const requestedTimeout = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const effectiveTimeoutMs = Math.max(requestedTimeout, MIN_TIMEOUT_MS);
+
+  let lastError: GeminiInvocationError | undefined;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await invokeGeminiOnce(options, effectiveTimeoutMs);
+    } catch (error) {
+      if (error instanceof GeminiInvocationError && error.message.includes("timed out")) {
+        lastError = error;
+
+        // Don't retry if we've exhausted retries
+        if (attempt < MAX_RETRIES) {
+          // Wait before retrying (exponential backoff: 2s, 4s)
+          const delay = RETRY_DELAY_MS * Math.pow(2, attempt);
+          await sleep(delay);
+          continue;
+        }
+      }
+      // Non-timeout errors are thrown immediately
+      throw error;
+    }
+  }
+
+  // If we get here, all retries failed
+  throw new GeminiInvocationError(
+    `Gemini invocation failed after ${MAX_RETRIES + 1} attempts (last error: ${lastError?.message})`,
+    lastError?.exitCode ?? -1,
+    lastError?.stdout ?? "",
+    lastError?.stderr ?? ""
+  );
 }
