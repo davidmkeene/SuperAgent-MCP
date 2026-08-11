@@ -5,6 +5,7 @@ import { registerProcess } from "./processManager.js";
 export interface CodexInvocationOptions {
   prompt: string;
   agentSystemPrompt?: string;
+  model?: string;
   extraArgs?: string[];
   timeoutMs?: number;
   workingDirectory?: string;
@@ -48,7 +49,19 @@ function buildArgs(options: CodexInvocationOptions): string[] {
     "--dangerously-bypass-approvals-and-sandbox"  // Full permissions - no restrictions
   ];
 
-  // Note: model parameter removed as it's not reliably supported
+  // Model selection. Verified 2026-08-11 against codex-cli 0.147.0 by running a real
+  // shell command and checking the returned output against a known value:
+  //   gpt-5.3-codex     WORKS — executes shell, exit_code reported, ~3s. Use this.
+  //   o4-mini           DO NOT USE. Fails: emits "Model metadata not found", then loops
+  //                     ~12 empty web_search calls, burns ~20k tokens, and finally
+  //                     answers CANNOT_EXECUTE without ever running the command.
+  //   o3 / gpt-5-codex-mini  UNVERIFIED here — test before relying on them.
+  // NOTE: codex-cli prints "Model metadata for <id> not found. Defaulting to fallback
+  // metadata" for ids missing from its internal table. On gpt-5.3-codex this is benign
+  // (execution still works); it is NOT a signal the model is unusable.
+  if (options.model) {
+    args.push("-m", options.model);
+  }
 
   if (options.extraArgs && options.extraArgs.length > 0) {
     args.push(...options.extraArgs);
@@ -165,7 +178,9 @@ export async function invokeCodex(options: CodexInvocationOptions): Promise<Code
   const args = buildArgs(options);
   const start = Date.now();
 
-  const child = spawn("codex", args, {
+  // Use full path to codex CLI to ensure it's found regardless of PATH
+  const codexPath = process.env.CODEX_PATH || "/usr/local/bin/codex";
+  const child = spawn(codexPath, args, {
     cwd: options.workingDirectory ?? process.cwd(),
     env: process.env,
     stdio: ["pipe", "pipe", "pipe"]
