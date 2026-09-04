@@ -78,7 +78,7 @@ function createToolDefinitions(): { codex: Tool, gemini: Tool, continue: Tool, g
     },
     ollama: {
       name: OLLAMA_TOOL,
-      description: "Run local Ollama models on the RE-Orch-01 GPUs (192.168.1.100:11434, 2x Tesla V100-32GB). Cost is electricity only. NO TOOL LAYER - text in, text out; it cannot run commands, read files or verify anything, so never assign it audit work. Models verified present 2026-08-11: qwen2.5-coder:32b-instruct-q4_K_M (best local code review), codestral:22b, deepseek-coder-v2:16b, qwen2.5:72b / llama3.1:70b (max local reasoning), qwen3:30b-a3b (default), gemma2:27b-instruct-q4_K_M (often warm, lowest latency), qwen2.5-coder:7b-instruct-q4_K_M (fast), bge-m3 + nomic-embed-text (embeddings). Use for drafting, summarising, classifying and embedding.",
+      description: "Run text-only local Ollama inference across RE-Orch-01, RE-Orch-02, and NAS. Supply a task class and omit host/model to use health-checked fleet routing. Context defaults to 16384 to avoid RAM spill. This adapter cannot execute tools or inspect files; use it for drafting, summarizing, classifying, embeddings, and text supplied in the prompt. Load canonical RAG entry 3ff6a0a1 (local-compute roster v2, 2026-09-03) for current model guidance. For real tool loops use mcp__ollama-local__ollama_chat (accepts tools[]) or curl the host directly.",
       inputSchema: zodToJsonSchema(OllamaInvokeSchema) as Tool["inputSchema"]
     },
     multi: {
@@ -415,7 +415,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     resultParts.push(`=== Ollama Local Inference ===`);
     resultParts.push(`Concurrency: ${parsed.concurrency}`);
-    resultParts.push(`Host: ${parsed.inputs[0]?.host || 'http://192.168.1.100:11434'}`);
+    const pinnedHosts = [...new Set(parsed.inputs.map((input) => input.host).filter(Boolean))];
+    resultParts.push(pinnedHosts.length > 0
+      ? `Pinned host(s): ${pinnedHosts.join(", ")}`
+      : "Routing: health-checked local fleet");
     resultParts.push(``);
 
     for (let i = 0; i < results.length; i++) {
