@@ -1,4 +1,4 @@
-import { route, type TaskClass } from "./fleet.js";
+import { probeFleet, route, type TaskClass } from "./fleet.js";
 
 /**
  * Ollama Agent - Local LLM inference via Ollama API
@@ -21,6 +21,7 @@ export interface OllamaInvocationOptions {
   model?: string;
   host?: string;
   task?: TaskClass;
+  numCtx?: number;
   keepAlive?: string | number;
   timeoutMs?: number;
   stream?: boolean;
@@ -118,6 +119,7 @@ export interface OllamaChatOptions {
   model?: string;
   host?: string;
   task?: TaskClass;
+  numCtx?: number;
   keepAlive?: string | number;
   timeoutMs?: number;
 }
@@ -135,8 +137,9 @@ interface OllamaChatApiResponse {
 }
 
 export async function invokeOllama(options: OllamaInvocationOptions): Promise<OllamaInvocationResponse> {
+  if (!options.host && !options.model && options.task) await probeFleet();
   const routed = (!options.host && !options.model && options.task) ? route(options.task) : undefined;
-  const host = options.host || routed?.endpoint || DEFAULT_HOST;
+  const host = options.host || routed?.host.endpoint || DEFAULT_HOST;
   const model = options.model || routed?.model || DEFAULT_MODEL;
   const keepAlive = options.keepAlive ?? DEFAULT_KEEP_ALIVE;
   const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
@@ -161,7 +164,8 @@ export async function invokeOllama(options: OllamaInvocationOptions): Promise<Ol
         model,
         prompt: fullPrompt,
         stream: false,
-        keep_alive: keepAlive
+        keep_alive: keepAlive,
+        options: { num_ctx: options.numCtx ?? 16384 }
       }),
       signal: controller.signal
     });
@@ -273,8 +277,9 @@ export async function unloadAll(endpoint: string): Promise<string[]> {
 }
 
 export async function runOllamaChat(options: OllamaChatOptions): Promise<OllamaChatResponse> {
+  if (!options.host && !options.model && options.task) await probeFleet();
   const routed = (!options.host && !options.model && options.task) ? route(options.task) : undefined;
-  const host = options.host || routed?.endpoint || DEFAULT_HOST;
+  const host = options.host || routed?.host.endpoint || DEFAULT_HOST;
   const model = options.model || routed?.model || DEFAULT_MODEL;
   const keepAlive = options.keepAlive ?? DEFAULT_KEEP_ALIVE;
   const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
@@ -294,7 +299,8 @@ export async function runOllamaChat(options: OllamaChatOptions): Promise<OllamaC
         messages: options.messages,
         tools: options.tools,
         stream: false,
-        keep_alive: keepAlive
+        keep_alive: keepAlive,
+        options: { num_ctx: options.numCtx ?? 16384 }
       }),
       signal: controller.signal
     });

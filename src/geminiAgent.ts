@@ -136,7 +136,8 @@ async function invokeGeminiOnce(options: GeminiInvocationOptions, effectiveTimeo
   const geminiPath = process.env.GEMINI_PATH || "/usr/local/bin/gemini";
   const child = spawn(geminiPath, args, {
     cwd: options.workingDirectory ?? process.cwd(),
-    env: process.env,
+    // gemini-cli >= 0.5x refuses headless runs in untrusted folders (exit 55) — 2026-09-03
+    env: { ...process.env, GEMINI_CLI_TRUST_WORKSPACE: process.env.GEMINI_CLI_TRUST_WORKSPACE || "true" },
     stdio: ["pipe", "pipe", "pipe"]
   });
 

@@ -1,7 +1,7 @@
 /**
  * Local inference fleet — host definitions and a simple router.
  *
- * Every figure below was measured on 2026-08-11, not recalled:
+ * Hardware was measured on 2026-08-11; model presence was rechecked live on 2026-09-01:
  *   lscpu / free -g / lspci -nn / nvidia-smi / GET :11434/api/tags / POST :11434/api/show
  *
  * WHY THIS EXISTS: three capable boxes were sitting idle while work was routed to paid
@@ -9,7 +9,7 @@
  * default and encodes which box is safe to load.
  */
 
-export type Accel = "cuda" | "rocm-igpu" | "cpu";
+export type Accel = "cuda" | "rocm-igpu" | "vulkan-igpu" | "cpu";
 export type TaskClass =
   | "embed"          // vector embeddings
   | "classify"       // short label/extract/route decisions
@@ -68,18 +68,23 @@ export const FLEET: Record<string, FleetHost> = {
     cpu: "AMD Ryzen AI 9 HX PRO 370 w/ Radeon 890M",
     cores: 24,
     ramGB: 91,
-    accel: "rocm-igpu",
-    accelMemGB: 48,
+    accel: "vulkan-igpu",
+    accelMemGB: 42,
     accelDetail:
-      "Radeon 890M (Strix) iGPU with unified memory. The ollama container already has " +
-      "/dev/kfd + /dev/dri passed through, so ROCm acceleration is wired and working.",
-    maxModelGB: 30,
+      "Radeon 890M (Strix, gfx1150) iGPU with unified memory, driven through VULKAN (RADV) since 2026-09-03. " +
+      "Container: ollama/ollama:latest (0.33.3) with OLLAMA_VULKAN=1 + --device /dev/dri only. " +
+      "The previous ollama/ollama:rocm container emitted garbage under every HSA_OVERRIDE_GFX_VERSION " +
+      "(11.0.0/11.0.2/11.5.0) — ROCm is BROKEN for gfx1150 here; it is kept stopped as ollama-rocm-old for rollback. " +
+      "Verified 2026-09-03: qwen2.5:7b 18.7 tok/s, qwen2.5:14b tool_calls OK at 8.8 tok/s, 49/49 layers on GPU, 42 GB visible.",
+    maxModelGB: 40,
     cost: 3,
     sharedWith: "RE:Aria PRODUCTION, Frigate NVR + cameras",
     notes:
       "DO NOT SATURATE. This box runs Aria production and Frigate recording. " +
-      "Currently holds only qwen2.5:7b — heavily underused, but headroom must be left for Aria. " +
-      "Prefer for embeddings and light work co-located with Aria data.",
+      "Role per operator 2026-09-03: embeddings + LONG-RUNNING BACKGROUND analysis (RAG restructuring, batch review) " +
+      "where latency does not matter — a 32B/70B Q4 fits in unified memory at ~4/~2 tok/s. " +
+      "Never interactive bulk work; the router keeps it embed-only unless the caller passes sparePriorityHost=false. " +
+      "OLLAMA_NUM_PARALLEL=2, MAX_LOADED_MODELS=2, KEEP_ALIVE=30m, CONTEXT_LENGTH=32768.",
   },
 
   orch02: {
@@ -90,19 +95,22 @@ export const FLEET: Record<string, FleetHost> = {
     cores: 24,
     ramGB: 60,
     accel: "rocm-igpu",
-    accelMemGB: 32,
+    accelMemGB: 34,
     accelDetail:
-      "Radeon 890M (Strix) iGPU, unified memory carved from 60GB system RAM. " +
-      "Also has an XDNA Neural Processing Unit (Strix NPU) which ollama does NOT currently use.",
-    maxModelGB: 20,
+      "Radeon 890M iGPU via ROCm (native ollama 0.33.1, rocm_v7_2, HSA_OVERRIDE_GFX_VERSION=11.0.0, OLLAMA_IGPU_ENABLE=1). " +
+      "Unlike the NAS, ROCm output is CORRECT here (Debian 12 kernel 6.12.57). GTT cap 34.4 GB bounds GPU-visible memory. " +
+      "Verified 2026-09-03: qwen2.5:14b 49/49 layers on GPU at 8.2 tok/s (112 prompt tok/s); qwen3:8b tool_calls 15 tok/s; " +
+      "nemotron-3.5-lightning:30b-a3b tool_calls OK (~40 s cold). The XDNA NPU is not used by Ollama.",
+    maxModelGB: 28,
     cost: 2,
     notes:
-      "Lightest production burden of the three, so the safest box to load up. " +
-      "Debian 12, clean kernel state. Good default for small/medium parallel work.",
+      "Lightest production burden of the three, so the safest box for small parallel work. " +
+      "Tuned 2026-09-03 (zz-tuning-20260903.conf): KEEP_ALIVE=30m, MAX_LOADED_MODELS=2, CONTEXT_LENGTH=16384, NUM_PARALLEL=2. " +
+      "Models up to ~28 GB are fine (nemotron 30b-a3b, qwen2.5-coder:14b); 70B-class stays on orch01.",
   },
 };
 
-/** Models present per host, verified via /api/tags on 2026-08-11. */
+/** Models present per host, verified via /api/tags on 2026-09-03 (routing audit). */
 export interface FleetModel {
   name: string;
   sizeGB: number;
@@ -127,6 +135,8 @@ export interface FleetModel {
 
 export const MODELS: FleetModel[] = [
   // ---- orch01 only (need real VRAM) ----
+  { name: "nemotron-3.5-lightning:30b-a3b-q4_K_M", sizeGB: 18.6, hosts: ["orch01", "orch02"], tools: true, toolsVerified: true, good: ["agentic", "reason"] },
+  { name: "qwen3.8:27b",                       sizeGB: 17.0, hosts: ["orch01"], tools: true, toolsVerified: true, good: ["agentic", "reason", "summarize"] },
   { name: "qwen2.5:72b",                      sizeGB: 47.4, hosts: ["orch01"], tools: true,  good: ["reason"] },
   { name: "llama3.1:70b",                     sizeGB: 42.5, hosts: ["orch01"], tools: true,  good: ["reason"] },
   // NOTE: coder:32b advertises tools but does NOT emit structured tool_calls — see
@@ -139,8 +149,7 @@ export const MODELS: FleetModel[] = [
   { name: "deepseek-coder-v2:16b",            sizeGB: 8.9,  hosts: ["orch01"], tools: false, good: ["code-review", "draft"] },
 
   // ---- small, spread across boxes ----
-  // Pulled 2026-08-11 on Grok's placement advice, then verified serving.
-  { name: "qwen3:8b",                         sizeGB: 5.2,  hosts: ["orch02"], tools: true,  toolsVerified: true, good: ["agentic", "reason", "summarize"] },
+  { name: "qwen3:8b",                         sizeGB: 5.2,  hosts: ["orch01", "orch02"], tools: true,  toolsVerified: true, good: ["agentic", "reason", "summarize"] },
   { name: "qwen2.5:14b",                      sizeGB: 9.0,  hosts: ["nas", "orch02"], tools: true, good: ["summarize", "reason", "classify"] },
   { name: "qwen2.5-coder:7b",                 sizeGB: 4.7,  hosts: ["nas", "orch02"], tools: true, good: ["draft", "classify"] },
 
@@ -150,7 +159,7 @@ export const MODELS: FleetModel[] = [
   { name: "llama3.2:3b",                      sizeGB: 2.0,  hosts: ["orch02"], tools: true,  good: ["classify"] },
 
   // ---- embeddings ----
-  { name: "bge-m3:latest",                    sizeGB: 1.2,  hosts: ["orch01"], tools: false, good: ["embed"] },
+  { name: "bge-m3:latest",                    sizeGB: 1.2,  hosts: ["orch01", "orch02"], tools: false, good: ["embed"] },
   { name: "nomic-embed-text:latest",          sizeGB: 0.3,  hosts: ["orch01", "nas", "orch02"], tools: false, good: ["embed"] },
 ];
 

@@ -47,8 +47,13 @@ export const DeepSeekPromptSchema = z.object({
 // Ollama-specific prompt schema with model/host options
 export const OllamaPromptSchema = z.object({
   prompt: z.string().min(1, "prompt must not be empty").describe("The prompt to send to Ollama"),
-  model: z.string().optional().describe("Ollama model (default: qwen3:30b-a3b). Options: qwen3:30b-a3b (general), qwen2.5:72b (max reasoning), llama3.1:70b (general), gemma2:27b-instruct-q4_K_M (general, often warm — lowest latency), qwen2.5-coder:32b-instruct-q4_K_M (best code review), qwen2.5-coder:7b-instruct-q4_K_M (fast autocomplete), codestral:22b (code), deepseek-coder-v2:16b (fast code review)"),
+  task: z.enum(["embed", "classify", "summarize", "draft", "code-review", "reason", "agentic"])
+    .default("draft")
+    .describe("Task class used by the live fleet router when host and model are not pinned"),
+  model: z.string().optional().describe("Optional Ollama model override; omit with host to use fleet routing"),
   host: z.string().optional().describe("Ollama API host (default: http://192.168.1.100:11434)"),
+  numCtx: z.number().int().min(2048).max(131072).default(16384)
+    .describe("Ollama context window; defaults to 16384 to prevent host-RAM spill"),
   timeoutMs: z.number().int().positive().max(10 * 60 * 1000).optional().describe("Timeout in milliseconds (default: 5 min, max: 10 min)")
 });
 
