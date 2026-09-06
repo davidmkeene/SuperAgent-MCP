@@ -58,16 +58,9 @@ function buildArgs(options: GrokInvocationOptions): string[] {
   // Use headless mode with prompt flag
   args.push("-p", fullPrompt);
 
-  // Model selection. Verified 2026-08-11 against `grok models` (grok CLI 0.1.220):
-  //   grok-build-latest              CLI default, self-updating alias — prefer this for build/coding
-  //   grok-4.5                       NEWEST reasoning model
-  //   grok-4.3                       previous reasoning flagship
-  //   grok-4.20-0309-reasoning       / -non-reasoning
-  //   grok-4.20-multi-agent-0309     multi-agent
-  //   grok-build-0.1                 pinned build agent (grok-build-latest supersedes)
-  // NOT in the live list (do not use): grok-4-latest, grok-code-fast-1, grok-3-mini,
-  // grok-4-1-fast-latest. These were carried here as "still routing" aliases but xAI
-  // no longer advertises them; re-check with `grok models` before reinstating.
+  // Native subscription CLI 1.0.13 reported grok-4.6 (default) and grok-4.5 on
+  // 2026-09-06. Omit -m by default so a future CLI registry change does not turn
+  // a healthy subscription into an adapter failure.
   if (options.model) {
     args.push("-m", options.model);
   }

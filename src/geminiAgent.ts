@@ -67,8 +67,11 @@ function buildArgs(options: GeminiInvocationOptions): string[] {
   // Add YOLO mode for automatic approval of all actions
   args.push("-y");  // or "--yolo"
 
-  // Model selection: gemini-2.5-flash (default), gemini-2.5-flash-lite (worker/min),
-  // gemini-2.5-pro (planner/max, quota-limited). gemini CLI 0.18.4.
+  // Leave model selection to the subscription CLI unless the caller explicitly
+  // pins one. Gemini CLI 0.58.0 currently routes its default through the live
+  // account/model registry (observed 2026-09-06 routing among current 3.x
+  // models). Hard-coding the old 2.5 aliases made this adapter
+  // stale even though the CLI itself remained healthy.
   //
   // 2026-08-11 observed: gemini-2.5-flash executed a real shell command correctly, then
   // hit "You have exhausted your daily quota on this model" ~7 minutes later. Treat
@@ -80,8 +83,9 @@ function buildArgs(options: GeminiInvocationOptions): string[] {
   // CAUTION: this agent runs with -y (YOLO) and auto-approves every action, and unlike
   // grok/codex it returns no tool-call trace, so its actions cannot be audited after the
   // fact. Do not give it tasks that can mutate production.
-  const model = options.model || "gemini-2.5-flash";
-  args.push("-m", model);
+  if (options.model) {
+    args.push("-m", options.model);
+  }
 
   return args;
 }

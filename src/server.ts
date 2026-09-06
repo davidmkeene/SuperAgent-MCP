@@ -58,7 +58,7 @@ function createToolDefinitions(): { codex: Tool, gemini: Tool, continue: Tool, g
     },
     gemini: {
       name: GEMINI_TOOL,
-      description: "Run Gemini CLI agent with parallel execution. Has real shell access BUT runs with -y (YOLO) auto-approving every action AND returns no tool-call trace, so what it did cannot be audited afterwards - NEVER give it tasks that can mutate production. Models (gemini CLI 0.18.4): gemini-2.5-flash (default), gemini-2.5-flash-lite (cheapest), gemini-2.5-pro (quota-limited). BEST-EFFORT ONLY: daily quota was observed exhausted on 2026-08-11 mid-session, so always have a fallback provider. Good for: bulk local code drafting and read-only analysis.",
+      description: "Run Gemini subscription CLI with parallel execution. Model omitted uses the CLI's live account routing (verified 2026-09-06 with Gemini CLI 0.58.0 using current 3.x models). Explicit model IDs are passed through and may be provider aliases. Runs with YOLO approval and returns no auditable tool trace, so assign read-only work only.",
       inputSchema: zodToJsonSchema(GeminiInvokeSchema) as Tool["inputSchema"]
     },
     continue: {
@@ -68,7 +68,7 @@ function createToolDefinitions(): { codex: Tool, gemini: Tool, continue: Tool, g
     },
     grok: {
       name: GROK_TOOL,
-      description: "Run xAI Grok CLI agent with parallel execution. PREFERRED for audit/verification work: it has real shell access AND returns the full bash tool-call trace, so you can confirm it actually ran the command instead of inventing the answer. Fastest of the CLI agents (~2-3s). MODELS (live from `grok models`, verified 2026-08-11): grok-build-latest = CLI default, self-updating alias, best for build/coding. grok-4.5 = NEWEST reasoning model. grok-4.3 = previous reasoning flagship. grok-4.20-0309-reasoning / -non-reasoning / grok-4.20-multi-agent-0309. grok-build-0.1 = pinned, superseded by grok-build-latest. DEAD, do NOT use (xAI no longer advertises them): grok-4-latest, grok-code-fast-1, grok-3-mini, grok-4-1-fast-latest.",
+      description: "Run the native Grok subscription CLI with parallel execution and an auditable tool trace. Model omitted uses the CLI default. Live `grok models` verification on 2026-09-06 with CLI 1.0.13 reported grok-4.6 (default) and grok-4.5; other historical IDs are not advertised and must not be guessed.",
       inputSchema: zodToJsonSchema(GrokInvokeSchema) as Tool["inputSchema"]
     },
     deepseek: {
