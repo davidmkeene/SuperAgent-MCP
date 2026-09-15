@@ -53,7 +53,7 @@ function createToolDefinitions(): { codex: Tool, gemini: Tool, continue: Tool, g
   return {
     codex: {
       name: CODEX_TOOL,
-      description: "Run Codex CLI agent with parallel execution. Codex has REAL shell access and returns a command_execution trace with exit codes, so its work is auditable. Use 'workingDirectory' to target a project. MODELS (verified 2026-08-11, codex-cli 0.147.0): gpt-5.3-codex = VERIFIED WORKING, executes shell in ~3s - USE THIS. o4-mini = BROKEN, do not use: it loops empty web searches, burns ~20k tokens and returns CANNOT_EXECUTE without running anything. o3 / gpt-5-codex-mini = unverified. A 'Model metadata not found' warning is benign and does not mean the model failed.",
+      description: "Run Codex CLI agent with parallel execution. Codex has REAL shell access and returns a command_execution trace with exit codes, so its work is auditable. Use 'workingDirectory' to target a project. MODEL: use the RE:Orch role primary (reo_catalog role reo-codex-operator / codex); do not hard-code one here. History (codex-cli 0.147.0, 2026-08-11): gpt-5.3-codex executed shell in ~3s. o4-mini = BROKEN, do not use: it loops empty web searches, burns ~20k tokens and returns CANNOT_EXECUTE without running anything. o3 / gpt-5-codex-mini = unverified. A 'Model metadata not found' warning is benign and does not mean the model failed.",
       inputSchema: zodToJsonSchema(CodexInvokeSchema) as Tool["inputSchema"]
     },
     gemini: {
