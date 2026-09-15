@@ -108,6 +108,55 @@ export const FLEET: Record<string, FleetHost> = {
       "Tuned 2026-09-03 (zz-tuning-20260903.conf): KEEP_ALIVE=30m, MAX_LOADED_MODELS=2, CONTEXT_LENGTH=16384, NUM_PARALLEL=2. " +
       "Models up to ~28 GB are fine (nemotron 30b-a3b, qwen2.5-coder:14b); 70B-class stays on orch01.",
   },
+
+  // Dedicated sidecar lanes on the orch01 box (registered 2026-09-15, REPORT.md §9.2 R-1).
+  // Same physical hardware as `orch01` — NOT independent capacity — so they are pin-only:
+  // the default hostRank()/route() ranking leaves unknown ids at rank 99, meaning normal
+  // task routing still prefers orch01/orch02/nas exactly as before. Reach these lanes only
+  // via `pinHost: "orch01long"` / `pinHost: "orch01cpu"`.
+  orch01long: {
+    id: "orch01long",
+    endpoint: "http://192.168.1.100:11437",
+    hostname: "RE-ORCHESTRATOR-01",
+    cpu: "AMD Ryzen Threadripper PRO 9955WX",
+    cores: 32,
+    ramGB: 125,
+    accel: "cuda",
+    accelMemGB: 64,
+    accelDetail:
+      "Same 2x Tesla V100-SXM2-32GB as orch01 — this is a SEPARATE ollama-cli.service instance on " +
+      "the same box (:11437, KEEP_ALIVE=24h), dedicated to long-context work: qwen-cli:200k, the " +
+      "same qwen3.8:27b weights with num_ctx 204800. Needle-verified 2026-09-15: a 79,419-token " +
+      "prompt answered correctly in 159.6s (~499 tok/s ingest; ~7 min before generation starts on " +
+      "a full 200k prompt).",
+    maxModelGB: 60,
+    cost: 1,
+    sharedWith: "orch01 (same 2x V100s — GPU memory is shared; do not assume both instances can load their heaviest models at once)",
+    notes:
+      "DEDICATED LONG-CONTEXT LANE. Only holds qwen-cli:200k. Pin explicitly (pinHost: \"orch01long\") " +
+      "for --ctx long / big single-shot reasoning jobs; not part of normal task-class ranking.",
+  },
+
+  orch01cpu: {
+    id: "orch01cpu",
+    endpoint: "http://192.168.1.100:11438",
+    hostname: "RE-ORCHESTRATOR-01",
+    cpu: "AMD Ryzen Threadripper PRO 9955WX",
+    cores: 32,
+    ramGB: 125,
+    accel: "cpu",
+    accelMemGB: 0,
+    accelDetail:
+      "CPU-only ollama instance on the same box as orch01 (CUDA_VISIBLE_DEVICES=-1, :11438). Runs " +
+      "qwen-orch-cpu:latest (qwen3:30b-a3b Q4 MoE). Architecture context 262144 via 125 GB ECC RAM, " +
+      "not VRAM; live tag num_ctx is 16384 inside a 40G cgroup. SLOW.",
+    maxModelGB: 40,
+    cost: 5,
+    sharedWith: "orch01 (same CPU/RAM; operator-triggered via reo_job_queues \"cpu-orch\" — do not steal local-fleet-queue-wg members)",
+    notes:
+      "OVERNIGHT / BATCH ONLY. Pin explicitly (pinHost: \"orch01cpu\"); not part of normal " +
+      "task-class ranking (slow: ~40 tok/s).",
+  },
 };
 
 /** Models present per host, verified via /api/tags on 2026-09-03 (routing audit). */
@@ -157,6 +206,10 @@ export const MODELS: FleetModel[] = [
   { name: "qwen2.5-coder:7b-instruct-q4_K_M", sizeGB: 4.7,  hosts: ["orch01"], tools: true,  good: ["draft", "classify"] },
   { name: "qwen2.5:7b",                       sizeGB: 4.7,  hosts: ["nas", "orch02"], tools: true, good: ["classify", "summarize"] },
   { name: "llama3.2:3b",                      sizeGB: 2.0,  hosts: ["orch02"], tools: true,  good: ["classify"] },
+
+  // ---- orch01 dedicated sidecar lanes (:11437 / :11438) — pin-only, see FLEET notes above ----
+  { name: "qwen-cli:200k",                    sizeGB: 17.0, hosts: ["orch01long"], tools: true, toolsVerified: true, good: ["agentic", "reason", "summarize", "draft"] },
+  { name: "qwen-orch-cpu",                    sizeGB: 18.6, hosts: ["orch01cpu"],  tools: true, toolsVerified: true, good: ["reason", "summarize", "draft"] },
 
   // ---- embeddings ----
   { name: "bge-m3:latest",                    sizeGB: 1.2,  hosts: ["orch01", "orch02"], tools: false, good: ["embed"] },
