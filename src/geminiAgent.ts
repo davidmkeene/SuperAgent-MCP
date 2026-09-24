@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { accountCli } from "./accounting.js";
 
 export interface GeminiInvocationOptions {
   prompt: string;
@@ -176,7 +177,7 @@ async function invokeGeminiOnce(options: GeminiInvocationOptions, effectiveTimeo
   const stdout = Buffer.concat(stdoutChunks).toString("utf8");
   const stderr = Buffer.concat(stderrChunks).toString("utf8");
 
-  const exitCode = closeResult[0] ?? 0;
+  const exitCode = closeResult[0] ?? -1;
 
   if (exitCode !== 0) {
     throw new GeminiInvocationError(
@@ -208,7 +209,7 @@ export async function invokeGemini(options: GeminiInvocationOptions): Promise<Ge
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      return await invokeGeminiOnce(options, effectiveTimeoutMs);
+      return await accountCli("gemini", options.model || "gemini-2.5-flash", () => invokeGeminiOnce(options, effectiveTimeoutMs));
     } catch (error) {
       if (error instanceof GeminiInvocationError && error.message.includes("timed out")) {
         lastError = error;

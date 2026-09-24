@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { accountCli } from "./accounting.js";
+import { codexModel } from "./usage.js";
 
 export interface CodexInvocationOptions {
   prompt: string;
@@ -48,17 +50,11 @@ function buildArgs(options: CodexInvocationOptions): string[] {
     "--dangerously-bypass-approvals-and-sandbox"  // Full permissions - no restrictions
   ];
 
-  // Model selection. Verified 2026-08-11 against codex-cli 0.147.0 by running a real
-  // shell command and checking the returned output against a known value:
-  //   gpt-5.3-codex     WORKS — executes shell, exit_code reported, ~3s. Use this.
-  //   o4-mini           DO NOT USE. Fails: emits "Model metadata not found", then loops
-  //                     ~12 empty web_search calls, burns ~20k tokens, and finally
-  //                     answers CANNOT_EXECUTE without ever running the command.
-  //   o3 / gpt-5-codex-mini  UNVERIFIED here — test before relying on them.
-  // NOTE: codex-cli prints "Model metadata for <id> not found. Defaulting to fallback
-  // metadata" for ids missing from its internal table. On gpt-5.3-codex this is benign
-  // (execution still works); it is NOT a signal the model is unusable.
-  if (options.model) {
+  // invokeCodex resolves the configured model before spawning. Explicit CLI
+  // model flags take precedence and must not be duplicated.
+  const extra = options.extraArgs || [];
+  const hasModelFlag = extra.some(arg => arg === "-m" || arg === "--model" || arg.startsWith("--model=") || (arg.startsWith("-m") && arg.length > 2));
+  if (options.model && !hasModelFlag) {
     args.push("-m", options.model);
   }
 
@@ -113,6 +109,11 @@ function parseAssistantReply(events: CodexInvocationEvent[]): string {
   for (const event of events) {
     if (!event || typeof event !== "object") {
       continue;
+    }
+
+    if (event.type === "item.completed" && event.item && typeof event.item === "object") {
+      const item = event.item as Record<string, unknown>;
+      if (item.type === "agent_message" && typeof item.text === "string") replies.push(item.text);
     }
 
     if ("msg" in event && event.msg && typeof event.msg === "object") {
@@ -174,6 +175,13 @@ User request:
 `;
 
 export async function invokeCodex(options: CodexInvocationOptions): Promise<CodexInvocationResponse> {
+  const model = codexModel(options);
+  // Force the resolved model into the actual CLI invocation. This prevents
+  // project config from silently changing the model charged by the receipt.
+  return accountCli("codex", model, () => invokeCodexOnce({ ...options, model }));
+}
+
+async function invokeCodexOnce(options: CodexInvocationOptions): Promise<CodexInvocationResponse> {
   const args = buildArgs(options);
   const start = Date.now();
 
@@ -221,7 +229,7 @@ export async function invokeCodex(options: CodexInvocationOptions): Promise<Code
   const stdout = Buffer.concat(stdoutChunks).toString("utf8");
   const stderr = Buffer.concat(stderrChunks).toString("utf8");
 
-  const exitCode = closeResult[0] ?? 0;
+  const exitCode = closeResult[0] ?? -1;
 
   if (exitCode !== 0) {
     throw new CodexInvocationError(

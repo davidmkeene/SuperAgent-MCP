@@ -11,7 +11,9 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "dev": "ts-node src/server.ts",
-    "postinstall": "node scripts/postinstall.js"
+    "postinstall": "node scripts/postinstall.js",
+    "test": "npm run build && node --test tests/usage.test.mjs",
+    "test:integration": "npm run build && node --test tests/integration.test.mjs"
   },
   "files": [
     "dist/",

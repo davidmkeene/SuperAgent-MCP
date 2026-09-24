@@ -12,6 +12,7 @@ import { runCodexBatch, runGeminiBatch, runGrokBatch, runDeepSeekBatch, runOllam
 import { formatAgentsForDescription, ensureAgentsDirectory, loadAgents } from "./agentLoader.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { z } from "zod";
+import { collectCostReceipts, receiptMetadata } from "./accounting.js";
 
 // Color codes for tasks (1-16)
 const TASK_COLORS = [
@@ -114,6 +115,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 // @ts-expect-error MCP SDK type mismatch
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const attribution: Record<string, string> = {};
+  // Per-request attribution only; a shared MCP process must not borrow a
+  // globally active task or another client's session.
+  const supplied = (request as any).params._meta?.["reo/context"];
+  for (const key of ["session_id", "task_id", "project_id", "tenant_id"]) {
+    if (typeof supplied?.[key] === "string" && supplied[key]) attribution[key] = supplied[key];
+  }
+  const { result, receipts } = await collectCostReceipts(async () => {
   // @ts-expect-error
   const { name: toolName, arguments: args = {} } = request.params;
 
@@ -557,6 +566,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true
     };
   }
+  }, attribution);
+  return { ...result, _meta: { "reo/cost_receipts": receiptMetadata(receipts) } };
 });
 
 async function main() {

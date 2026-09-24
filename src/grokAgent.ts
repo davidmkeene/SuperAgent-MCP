@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { accountCli } from "./accounting.js";
 
 export interface GrokInvocationOptions {
   prompt: string;
@@ -56,7 +57,7 @@ function buildArgs(options: GrokInvocationOptions): string[] {
     options.prompt;
 
   // Use headless mode with prompt flag
-  args.push("-p", fullPrompt);
+  args.push("-p", fullPrompt, "--output-format", "json");
 
   // Model selection. Verified 2026-08-11 against `grok models` (grok CLI 0.1.220):
   //   grok-build-latest              CLI default, self-updating alias — prefer this for build/coding
@@ -80,6 +81,16 @@ function buildArgs(options: GrokInvocationOptions): string[] {
 }
 
 function parseGrokResponse(stdout: string, stderr: string): string {
+  // Keep machine-readable accounting out of the user-visible response.
+  try {
+    const result = JSON.parse(stdout);
+    if (typeof result.text === "string") return result.text;
+    if (typeof result.result === "string") return result.result;
+    if (typeof result.response === "string") return result.response;
+    if (Array.isArray(result.content)) {
+      return result.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
+    }
+  } catch { /* Preserve the legacy text path for older CLIs. */ }
   // Grok CLI outputs conversationally to stdout
   // Filter out any progress indicators or metadata
 
@@ -117,6 +128,10 @@ function parseGrokResponse(stdout: string, stderr: string): string {
 }
 
 export async function invokeGrok(options: GrokInvocationOptions): Promise<GrokInvocationResponse> {
+  return accountCli("grok", options.model, () => invokeGrokOnce(options));
+}
+
+async function invokeGrokOnce(options: GrokInvocationOptions): Promise<GrokInvocationResponse> {
   const args = buildArgs(options);
   const start = Date.now();
 
@@ -166,7 +181,7 @@ export async function invokeGrok(options: GrokInvocationOptions): Promise<GrokIn
   const stdout = Buffer.concat(stdoutChunks).toString("utf8");
   const stderr = Buffer.concat(stderrChunks).toString("utf8");
 
-  const exitCode = closeResult[0] ?? 0;
+  const exitCode = closeResult[0] ?? -1;
 
   if (exitCode !== 0) {
     throw new GrokInvocationError(
