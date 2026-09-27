@@ -39,6 +39,24 @@ Once connected, the client will discover these tools:
 }
 ```
 
+### Codex and Grok results (compact by default)
+The `codex` and `grok` tools return JSON per input: `final_message`, `usage`
+(Codex: `input_tokens`, `cached_input_tokens`, `output_tokens`,
+`reasoning_output_tokens`; Grok's plain output mode reports none), `exit_code`,
+`duration_ms`, `model` (`id` and `source`), `files_changed`, `commands`, and
+`trace_path`. On failure: `error`, `error_kind` (`model_rejected` when the
+provider refuses the model id), `last_error_event`, and `stderr_tail` (last
+2,000 chars). Set `trace: "full"` on an input to also get the raw stream inline.
+
+Full traces (raw stdout + stderr) are written to `$SUPERAGENT_TRACE_DIR`
+(default `~/.cache/superagent-mcp/traces`, mode 0600). Retention: files older
+than `$SUPERAGENT_TRACE_RETENTION_DAYS` (default 7) are deleted and at most
+`$SUPERAGENT_TRACE_MAX_FILES` (default 500) are kept; pruning runs on each write.
+
+Models: leave `model` unset to use the provider default. Server-side defaults
+exist only for Grok, DeepSeek and Ollama, all in `src/modelDefaults.ts`; Codex
+uses `model` from `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`).
+
 ## Agent Management
 - Agent definitions are Markdown files with frontmatter. You can edit or add new files in `~/.superagent/agents`.
 - The `list-agents` tool shows each agent's name and description so you can supply the `agent` field when invoking `codex`, `gemini`, or `continue`.
@@ -56,6 +74,7 @@ This can be set in your MCP client configuration's `env` section.
 ```bash
 npm install
 npm run build
+npm test    # builds, then runs tests/ (fake provider CLIs; no real calls)
 npm start   # runs the compiled server
 npm run dev # runs the TypeScript entrypoint with ts-node
 ```

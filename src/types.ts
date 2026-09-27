@@ -5,10 +5,11 @@ export const AgentIdentifierSchema = z.string().min(1).max(64);
 export const AgentPromptSchema = z.object({
   agent: z.string().optional().describe("Name of specialized agent to use (e.g., 'backend-architect', 'python-expert')"),
   prompt: z.string().min(1, "prompt must not be empty").describe("The prompt to send to the agent"),
-  model: z.string().optional().describe("Optional provider model ID. Grok defaults to grok-4.7 (operator selection, 2026-09-21); other CLI providers use their configured default when omitted. Explicit model IDs override these defaults and must be supported by the configured provider."),
+  model: z.string().optional().describe("Leave unset to use the provider default. Pass a model ID only if the operator has named one; a model the provider rejects returns an error naming it."),
   extraArgs: z.array(z.string()).optional().describe("Additional CLI arguments (Codex only)"),
   timeoutMs: z.number().int().positive().max(60 * 60 * 1000).optional().describe("Timeout in milliseconds (default: 30 min, max: 60 min)"),
-  workingDirectory: z.string().optional().describe("Directory path where agent should run. Use this to access different projects")
+  workingDirectory: z.string().optional().describe("Directory path where agent should run. Use this to access different projects"),
+  trace: z.enum(["summary", "full"]).default("summary").describe("summary (default): final message, usage, exit code, duration, model, files changed, and the path of a file holding the full event trace. full: also return the complete raw stdout/stderr (can exceed 200 KB).")
 });
 
 // Schema without agentEnv - base schema for both tools
@@ -39,7 +40,7 @@ export const BatchInvokeSchema = z.object({
 // DeepSeek-specific prompt schema
 export const DeepSeekPromptSchema = z.object({
   prompt: z.string().min(1, "prompt must not be empty").describe("The prompt to send to DeepSeek"),
-  model: z.string().optional().describe("DeepSeek model to use (default: deepseek-chat). Options: deepseek-chat (V3, fast/cheap), deepseek-reasoner (R1, chain-of-thought reasoning)"),
+  model: z.string().optional().describe("Leave unset to use the server's configured DeepSeek default. Pass a model ID only if the operator has named one."),
   apiKey: z.string().optional().describe("DeepSeek API key (default: DEEPSEEK_API_KEY env var)"),
   timeoutMs: z.number().int().positive().max(60 * 60 * 1000).optional().describe("Timeout in milliseconds (default: 10 min, max: 60 min)")
 });
@@ -89,7 +90,7 @@ export const MultiPromptSchema = z.object({
   provider: z.enum(["codex", "gemini", "grok", "deepseek", "ollama"]).describe("Which provider to use for this task"),
   prompt: z.string().min(1).describe("The prompt to send"),
   agent: z.string().optional().describe("Specialized agent name (e.g., 'backend-architect', 'security-engineer')"),
-  model: z.string().optional().describe("Model override for this task"),
+  model: z.string().optional().describe("Leave unset to use the provider default. Pass a model ID only if the operator has named one."),
   workingDirectory: z.string().optional().describe("Working directory for CLI agents (codex/gemini/grok)"),
   extraArgs: z.array(z.string()).optional().describe("Extra CLI args (Codex only)"),
   timeoutMs: z.number().int().positive().max(60 * 60 * 1000).optional().describe("Per-task timeout in ms"),
@@ -107,7 +108,7 @@ export const ChainStepSchema = z.object({
   provider: z.enum(["codex", "gemini", "grok", "deepseek", "ollama"]).describe("Provider for this step"),
   prompt: z.string().min(1).describe("Prompt template. Use {{prev}} to inject the previous step's output."),
   agent: z.string().optional().describe("Specialized agent name"),
-  model: z.string().optional().describe("Model override"),
+  model: z.string().optional().describe("Leave unset to use the provider default. Pass a model ID only if the operator has named one."),
   workingDirectory: z.string().optional().describe("Working directory for CLI agents"),
   extraArgs: z.array(z.string()).optional().describe("Extra CLI args (Codex only)"),
   timeoutMs: z.number().int().positive().max(60 * 60 * 1000).optional().describe("Per-step timeout in ms")
@@ -137,6 +138,23 @@ export interface AgentInvocationSuccess {
   rawEvents?: unknown[];
   rawOutput?: string;
   stderr?: string;
+  details?: ProviderRunDetails;
+}
+
+/** Compact run facts for codex/grok (see server.ts summaryResult). */
+export interface ProviderRunDetails {
+  model?: { id: string | null; source: string };
+  usage?: Record<string, number> | null;
+  usageNote?: string;
+  filesChanged?: { path: string; kind?: string }[];
+  commands?: { count: number; nonzero_exit: { command: string; exit_code: number }[] };
+  tracePath?: string;
+  note?: string;
+  errorKind?: string;
+  lastErrorEvent?: { type: string; status?: number; message: string };
+  stderrTail?: string;
+  rawStdout?: string;
+  rawStderr?: string;
 }
 
 export interface AgentInvocationErrorResult {
@@ -146,8 +164,10 @@ export interface AgentInvocationErrorResult {
   tool: string;
   error: string;
   exitCode?: number;
+  durationMs?: number;
   rawOutput?: string;
   stderr?: string;
+  details?: ProviderRunDetails;
 }
 
 export type AgentInvocationResult = AgentInvocationSuccess | AgentInvocationErrorResult;

@@ -24,6 +24,7 @@
  *   deepseek-v4-pro  Correctly answered CANNOT_EXECUTE. Honest about its limits.
  * => Prefer deepseek-v4-pro, and only for reasoning over text supplied in the prompt.
  */
+import { DEEPSEEK_DEFAULT_MODEL } from "./modelDefaults.js";
 
 export interface DeepSeekInvocationOptions {
   prompt: string;
@@ -58,7 +59,7 @@ export class DeepSeekInvocationError extends Error {
 }
 
 const DEFAULT_API_BASE = "https://api.deepseek.com";
-const DEFAULT_MODEL = "deepseek-v4-pro";
+const DEFAULT_MODEL = DEEPSEEK_DEFAULT_MODEL;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (reasoning model can be slow)
 
 const META_INSTRUCTION = `You are an MCP-invoked agent. Your responses should be:

@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { registerProcess } from "./processManager.js";
+import { summarizeCodexStream, isModelRejection, modelRejectedMessage, type CodexSummary } from "./codexEvents.js";
+import { codexModelUsed, type ModelUsed } from "./modelDefaults.js";
+import { writeTrace } from "./trace.js";
 
 export interface CodexInvocationOptions {
   prompt: string;
@@ -22,13 +25,23 @@ export interface CodexInvocationResponse {
   stdout: string;
   stderr: string;
   parsedEvents: CodexInvocationEvent[];
+  /** Final agent message (last agent_message item). Empty if none was emitted. */
   assistantReply: string;
+  summary: CodexSummary;
+  model: ModelUsed;
+  tracePath?: string;
 }
 
 export class CodexInvocationError extends Error {
   public readonly stdout: string;
   public readonly stderr: string;
   public readonly exitCode: number;
+  public summary?: CodexSummary;
+  public model?: ModelUsed;
+  public tracePath?: string;
+  public durationMs?: number;
+  /** "model_rejected" when the provider refused the model id. */
+  public kind?: "model_rejected" | "timeout" | "failed";
 
   constructor(message: string, exitCode: number, stdout: string, stderr: string) {
     super(message);
@@ -49,16 +62,9 @@ function buildArgs(options: CodexInvocationOptions): string[] {
     "--dangerously-bypass-approvals-and-sandbox"  // Full permissions - no restrictions
   ];
 
-  // Model selection. Verified 2026-08-11 against codex-cli 0.147.0 by running a real
-  // shell command and checking the returned output against a known value:
-  //   gpt-5.3-codex     WORKS — executes shell, exit_code reported, ~3s. Use this.
-  //   o4-mini           DO NOT USE. Fails: emits "Model metadata not found", then loops
-  //                     ~12 empty web_search calls, burns ~20k tokens, and finally
-  //                     answers CANNOT_EXECUTE without ever running the command.
-  //   o3 / gpt-5-codex-mini  UNVERIFIED here — test before relying on them.
-  // NOTE: codex-cli prints "Model metadata for <id> not found. Defaulting to fallback
-  // metadata" for ids missing from its internal table. On gpt-5.3-codex this is benign
-  // (execution still works); it is NOT a signal the model is unusable.
+  // Model: pass -m only when the caller supplies one (the operator named it).
+  // Unset => Codex uses its own configured default ($CODEX_HOME/config.toml).
+  // Do not add a recommended/default model here; see src/modelDefaults.ts.
   if (options.model) {
     args.push("-m", options.model);
   }
@@ -69,79 +75,6 @@ function buildArgs(options: CodexInvocationOptions): string[] {
 
   args.push("-");
   return args;
-}
-
-function collectFromMsg(msg: Record<string, unknown>, replies: string[]): void {
-  const type = msg["type"];
-
-  if (type === "agent_message") {
-    const message = msg["message"];
-    if (typeof message === "string" && message.trim().length > 0) {
-      replies.push(message.trim());
-    }
-
-    const content = msg["content"];
-    if (Array.isArray(content)) {
-      for (const chunk of content) {
-        if (chunk && typeof chunk === "object" && "text" in chunk) {
-          const text = (chunk as { text?: unknown }).text;
-          if (typeof text === "string" && text.trim().length > 0) {
-            replies.push(text.trim());
-          }
-        }
-      }
-    }
-  }
-
-  if (type === "assistant_message") {
-    const content = msg["content"];
-    if (Array.isArray(content)) {
-      for (const chunk of content) {
-        if (chunk && typeof chunk === "object" && "text" in chunk) {
-          const text = (chunk as { text?: unknown }).text;
-          if (typeof text === "string" && text.trim().length > 0) {
-            replies.push(text.trim());
-          }
-        }
-      }
-    }
-  }
-}
-
-function parseAssistantReply(events: CodexInvocationEvent[]): string {
-  const replies: string[] = [];
-
-  for (const event of events) {
-    if (!event || typeof event !== "object") {
-      continue;
-    }
-
-    if ("msg" in event && event.msg && typeof event.msg === "object") {
-      collectFromMsg(event.msg as Record<string, unknown>, replies);
-      continue;
-    }
-
-    if (event["type"] === "message") {
-      const data = event["data"] as Record<string, unknown> | undefined;
-      if (!data || data["role"] !== "assistant") {
-        continue;
-      }
-
-      const content = data["content"];
-      if (Array.isArray(content)) {
-        for (const chunk of content) {
-          if (chunk && typeof chunk === "object" && "text" in chunk) {
-            const text = (chunk as { text?: unknown }).text;
-            if (typeof text === "string" && text.length > 0) {
-              replies.push(text);
-            }
-          }
-        }
-      }
-    }
-  }
-
-  return replies.join("\n").trim();
 }
 
 function parseJsonLines(stdout: string): CodexInvocationEvent[] {
@@ -212,39 +145,59 @@ export async function invokeCodex(options: CodexInvocationOptions): Promise<Code
     }, timeoutMs);
   });
 
+  const finish = (exitCode: number, timedOut: boolean) => {
+    const durationMs = Date.now() - start;
+    const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+    const stderr = Buffer.concat(stderrChunks).toString("utf8");
+    const summary = summarizeCodexStream(stdout);
+    const model = codexModelUsed(options.model, options.extraArgs);
+    const tracePath = writeTrace("codex", {
+      meta: { exitCode, durationMs, model, cwd: options.workingDirectory ?? process.cwd(), timedOut },
+      stdout,
+      stderr
+    });
+    return { durationMs, stdout, stderr, summary, model, tracePath };
+  };
+
   let closeResult: [number | null, NodeJS.Signals | null];
   try {
     closeResult = (await Promise.race([once(child, "close"), timeoutPromise])) as [number | null, NodeJS.Signals | null];
+  } catch (error) {
+    if (error instanceof CodexInvocationError) {
+      const f = finish(-1, true);
+      Object.assign(error, { summary: f.summary, model: f.model, tracePath: f.tracePath, durationMs: f.durationMs, kind: "timeout" });
+    }
+    throw error;
   } finally {
     if (timeoutHandle) {
       clearTimeout(timeoutHandle);
     }
   }
 
-  const durationMs = Date.now() - start;
-  const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-  const stderr = Buffer.concat(stderrChunks).toString("utf8");
-
   const exitCode = closeResult[0] ?? 0;
+  const { durationMs, stdout, stderr, summary, model, tracePath } = finish(exitCode, false);
 
-  if (exitCode !== 0) {
-    throw new CodexInvocationError(
-      `Codex exited with code ${exitCode}`,
-      exitCode,
-      stdout,
-      stderr
-    );
+  if (exitCode !== 0 || summary.failed) {
+    const rejected = isModelRejection(summary.lastError, summary.lastError ? "" : stderr.slice(-4000));
+    const message = rejected
+      ? modelRejectedMessage("Codex", model.id, summary.lastError, stderr.slice(-400))
+      : summary.lastError
+        ? `Codex exited with code ${exitCode}: ${summary.lastError.message.slice(0, 400)}`
+        : `Codex exited with code ${exitCode}`;
+    const error = new CodexInvocationError(message, exitCode, stdout, stderr);
+    Object.assign(error, { summary, model, tracePath, durationMs, kind: rejected ? "model_rejected" : "failed" });
+    throw error;
   }
-
-  const events = parseJsonLines(stdout);
-  const assistantReply = parseAssistantReply(events);
 
   return {
     exitCode,
     durationMs,
     stdout,
     stderr,
-    parsedEvents: events,
-    assistantReply
+    parsedEvents: parseJsonLines(stdout),
+    assistantReply: summary.finalMessage,
+    summary,
+    model,
+    tracePath
   };
 }

@@ -2,6 +2,9 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { grokModelUsed, type ModelUsed } from "./modelDefaults.js";
+import { writeTrace } from "./trace.js";
+import { isModelRejection, modelRejectedMessage } from "./codexEvents.js";
 
 export interface GrokInvocationOptions {
   prompt: string;
@@ -18,12 +21,18 @@ export interface GrokInvocationResponse {
   stdout: string;
   stderr: string;
   response: string;
+  model: ModelUsed;
+  tracePath?: string;
 }
 
 export class GrokInvocationError extends Error {
   public readonly stdout: string;
   public readonly stderr: string;
   public readonly exitCode: number;
+  public model?: ModelUsed;
+  public tracePath?: string;
+  public durationMs?: number;
+  public kind?: "model_rejected" | "timeout" | "failed";
 
   constructor(message: string, exitCode: number, stdout: string, stderr: string) {
     super(message);
@@ -60,8 +69,9 @@ function buildArgs(options: GrokInvocationOptions): string[] {
   // Use headless mode with prompt flag
   args.push("-p", fullPrompt);
 
-  // Operator-selected default (2026-09-21); explicit per-call models still win.
-  args.push("-m", options.model || "grok-4.7");
+  // Server default lives in src/modelDefaults.ts; explicit per-call models win.
+  const model = grokModelUsed(options.model).id;
+  if (model) args.push("-m", model);
 
   // Auto-approve mode (similar to Gemini's YOLO mode)
   // The Grok CLI uses interactive mode by default, -p puts it in headless mode
@@ -147,28 +157,49 @@ export async function invokeGrok(options: GrokInvocationOptions): Promise<GrokIn
     }, timeoutMs);
   });
 
+  const model = grokModelUsed(options.model);
+  const finish = (exitCode: number, timedOut: boolean) => {
+    const durationMs = Date.now() - start;
+    const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+    const stderr = Buffer.concat(stderrChunks).toString("utf8");
+    const tracePath = writeTrace("grok", {
+      meta: { exitCode, durationMs, model, cwd: options.workingDirectory ?? process.cwd(), timedOut },
+      stdout,
+      stderr
+    });
+    return { durationMs, stdout, stderr, tracePath };
+  };
+
   let closeResult: [number | null, NodeJS.Signals | null];
   try {
     closeResult = (await Promise.race([once(child, "close"), timeoutPromise])) as [number | null, NodeJS.Signals | null];
+  } catch (error) {
+    if (error instanceof GrokInvocationError) {
+      const f = finish(-1, true);
+      Object.assign(error, { model, tracePath: f.tracePath, durationMs: f.durationMs, kind: "timeout" });
+    }
+    throw error;
   } finally {
     if (timeoutHandle) {
       clearTimeout(timeoutHandle);
     }
   }
 
-  const durationMs = Date.now() - start;
-  const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-  const stderr = Buffer.concat(stderrChunks).toString("utf8");
-
   const exitCode = closeResult[0] ?? 0;
+  const { durationMs, stdout, stderr, tracePath } = finish(exitCode, false);
 
   if (exitCode !== 0) {
-    throw new GrokInvocationError(
-      `Grok exited with code ${exitCode}`,
+    const errText = `${stderr.slice(-4000)}\n${stdout.slice(-2000)}`;
+    const rejected = isModelRejection(undefined, errText);
+    const lastLine = errText.trim().split("\n").filter((l) => /model/i.test(l)).pop() ?? "";
+    const error = new GrokInvocationError(
+      rejected ? modelRejectedMessage("Grok", model.id, undefined, lastLine) : `Grok exited with code ${exitCode}`,
       exitCode,
       stdout,
       stderr
     );
+    Object.assign(error, { model, tracePath, durationMs, kind: rejected ? "model_rejected" : "failed" });
+    throw error;
   }
 
   const response = parseGrokResponse(stdout, stderr);
@@ -178,6 +209,8 @@ export async function invokeGrok(options: GrokInvocationOptions): Promise<GrokIn
     durationMs,
     stdout,
     stderr,
-    response
+    response,
+    model,
+    tracePath
   };
 }

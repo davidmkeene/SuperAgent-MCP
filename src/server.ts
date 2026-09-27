@@ -11,6 +11,9 @@ import { CodexInvokeSchema, GeminiInvokeSchema, ContinueInvokeSchema, GrokInvoke
 import { runCodexBatch, runGeminiBatch, runContinueBatch, runGrokBatch, runDeepSeekBatch, runOllamaBatch, runMultiBatch, runChain } from "./runner.js";
 import { formatAgentsForDescription, ensureAgentsDirectory, loadAgents } from "./agentLoader.js";
 import { setupSignalHandlers } from "./processManager.js";
+import { AgentInvocationResult } from "./types.js";
+import { GROK_DEFAULT_MODEL } from "./modelDefaults.js";
+import { traceDir, retentionNote } from "./trace.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { z } from "zod";
 
@@ -53,12 +56,12 @@ function createToolDefinitions(): { codex: Tool, gemini: Tool, continue: Tool, g
   return {
     codex: {
       name: CODEX_TOOL,
-      description: "Run Codex CLI agent with parallel execution. Codex has REAL shell access and returns a command_execution trace with exit codes, so its work is auditable. Use 'workingDirectory' to target a project. MODELS (verified 2026-08-11, codex-cli 0.147.0): gpt-5.3-codex = VERIFIED WORKING, executes shell in ~3s - USE THIS. o4-mini = BROKEN, do not use: it loops empty web searches, burns ~20k tokens and returns CANNOT_EXECUTE without running anything. o3 / gpt-5-codex-mini = unverified. A 'Model metadata not found' warning is benign and does not mean the model failed.",
+      description: "Run Codex CLI agent with parallel execution. Codex has REAL shell access; every command it runs is recorded in the event trace, so its work is auditable. Use 'workingDirectory' to target a project. Model: leave `model` unset to use the provider default (Codex's own configured model); pass a model only if the operator has named one. A model the provider rejects returns an error naming that model. Result (JSON): final agent message, token usage (input, cached, output, reasoning), exit code, duration, the model actually used, files changed, commands run, and trace_path, a file holding the full event stream. Set trace: \"full\" on an input to also get the raw stream inline (often 100-300 KB).",
       inputSchema: zodToJsonSchema(CodexInvokeSchema) as Tool["inputSchema"]
     },
     gemini: {
       name: GEMINI_TOOL,
-      description: "Run Gemini subscription CLI with parallel execution. Model omitted uses the CLI's live account routing (verified 2026-09-06 with Gemini CLI 0.58.0 using current 3.x models). Explicit model IDs are passed through and may be provider aliases. Runs with YOLO approval and returns no auditable tool trace, so assign read-only work only.",
+      description: "Run Gemini subscription CLI with parallel execution. Model: leave `model` unset to use the provider default (the CLI's account routing); pass a model only if the operator has named one. Runs with YOLO approval and returns no auditable tool trace, so assign read-only work only.",
       inputSchema: zodToJsonSchema(GeminiInvokeSchema) as Tool["inputSchema"]
     },
     continue: {
@@ -68,12 +71,12 @@ function createToolDefinitions(): { codex: Tool, gemini: Tool, continue: Tool, g
     },
     grok: {
       name: GROK_TOOL,
-      description: "Run native Grok Build using the existing grok.com subscription login. Inherited XAI_API_KEY and GROK_API_KEY are removed from the child environment. Model omitted selects grok-4.7; an explicit model overrides it. Returns CLI stdout/stderr; no structured tool trace is promised.",
+      description: `Run native Grok Build using the existing grok.com subscription login. Inherited XAI_API_KEY and GROK_API_KEY are removed from the child environment. Model: leave \`model\` unset to use the default this server is configured with (currently ${GROK_DEFAULT_MODEL}, set in src/modelDefaults.ts; an operator setting, not a recommendation); pass a model only if the operator has named one. Result (JSON): final response, exit code, duration, the model used, and trace_path, a file holding full stdout/stderr. The CLI's plain output mode reports no token usage. Set trace: "full" on an input to also get raw stdout/stderr inline.`,
       inputSchema: zodToJsonSchema(GrokInvokeSchema) as Tool["inputSchema"]
     },
     deepseek: {
       name: DEEPSEEK_TOOL,
-      description: "Run DeepSeek via plain chat-completions API. NO TOOL LAYER: cannot execute shell, read files, or verify anything - NEVER assign it audit or verification work. MODELS (live list from /models, verified 2026-08-11): deepseek-v4-pro (current flagship, chain-of-thought, DEFAULT) and deepseek-v4-flash (fast/cheap). Legacy deepseek-chat / deepseek-reasoner are no longer published. WARNING verified by test: deepseek-chat FABRICATED realistic fake command output ('fatal: not a git repository') for a directory that IS a git repo, while deepseek-v4-pro correctly answered CANNOT_EXECUTE. Use v4-pro, and only for reasoning over text supplied in the prompt.",
+      description: "Run DeepSeek via plain chat-completions API. NO TOOL LAYER: cannot execute shell, read files, or verify anything - NEVER assign it audit or verification work; use it only for reasoning over text supplied in the prompt. Model: leave `model` unset to use the server's configured default; pass a model only if the operator has named one.",
       inputSchema: zodToJsonSchema(DeepSeekInvokeSchema) as Tool["inputSchema"]
     },
     ollama: {
@@ -97,6 +100,66 @@ function createToolDefinitions(): { codex: Tool, gemini: Tool, continue: Tool, g
       inputSchema: zodToJsonSchema(z.object({})) as Tool["inputSchema"]
     }
   };
+}
+
+/** Compact JSON result for codex/grok: no raw event stream unless trace:"full". */
+export function summaryResult(provider: string, result: AgentInvocationResult, index: number): Record<string, unknown> {
+  const d = result.details ?? {};
+  const common = {
+    task: result.agent || `Task-${index + 1}`,
+    provider: result.tool,
+    status: result.status,
+    exit_code: result.exitCode ?? null,
+    duration_ms: result.durationMs ?? null,
+    model: d.model ?? null,
+    usage: d.usage ?? null,
+    ...(d.usageNote ? { usage_note: d.usageNote } : {}),
+    ...(d.filesChanged ? { files_changed: d.filesChanged } : {}),
+    ...(d.commands ? { commands: d.commands } : {}),
+    trace_path: d.tracePath ?? null
+  };
+  if (result.status === "ok") {
+    return {
+      ...common,
+      final_message: result.response,
+      ...(d.note ? { note: d.note } : {}),
+      ...(d.rawStdout !== undefined ? { raw_stdout: d.rawStdout, raw_stderr: d.rawStderr } : {})
+    };
+  }
+  return {
+    ...common,
+    error: result.error,
+    ...(d.errorKind ? { error_kind: d.errorKind } : {}),
+    ...(d.lastErrorEvent ? { last_error_event: d.lastErrorEvent } : {}),
+    stderr_tail: d.stderrTail ?? "",
+    ...(d.rawStdout !== undefined ? { raw_stdout: d.rawStdout, raw_stderr: d.rawStderr } : {})
+  };
+}
+
+function summaryResponse(provider: string, concurrency: number, results: AgentInvocationResult[]) {
+  const body = {
+    tool: provider,
+    concurrency,
+    results: results.map((r, i) => summaryResult(provider, r, i)),
+    trace_dir: traceDir(),
+    trace_retention: retentionNote()
+  };
+  return {
+    content: [{ type: "text", text: JSON.stringify(body, null, 2) } satisfies TextContent]
+  };
+}
+
+/** One-line facts for multi/chain text output. */
+function detailLines(result: AgentInvocationResult): string[] {
+  const d = result.details;
+  if (!d) return [];
+  const lines: string[] = [];
+  if (d.model) lines.push(`Model: ${d.model.id ?? "unknown"} (${d.model.source})`);
+  if (d.usage) lines.push(`Usage: ${JSON.stringify(d.usage)}`);
+  if (d.tracePath) lines.push(`Trace: ${d.tracePath}`);
+  if (d.lastErrorEvent) lines.push(`Last error event: ${JSON.stringify(d.lastErrorEvent)}`);
+  if (d.stderrTail) lines.push(`Stderr (last ${d.stderrTail.length} chars):`, `  ${d.stderrTail.trim().split("\n").join("\n  ")}`);
+  return lines;
 }
 
 const server = new Server(
@@ -143,67 +206,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (toolName === CODEX_TOOL) {
     const parsed = CodexInvokeSchema.parse(args);
     const results = await runCodexBatch(parsed);
-
-    // Format results as clean text
-    const resultParts: string[] = [];
-
-    resultParts.push(`=== Codex Agent Execution ===`);
-    resultParts.push(`Concurrency: ${parsed.concurrency}`);
-    resultParts.push(``);
-
-    for (let i = 0; i < results.length; i++) {
-      const result = results[i];
-      const taskColor = TASK_COLORS[i % TASK_COLORS.length];
-      const taskName = result.agent || `Task-${i + 1}`;
-
-      if (result.status === "ok") {
-        resultParts.push(`${taskColor}━━━ Task: ${taskName} ━━━${RESET_COLOR}`);
-        resultParts.push(`Status: ✓ Success (${result.durationMs}ms)`);
-        resultParts.push(`Response:`);
-        if (result.response) {
-          resultParts.push(`  ${result.response.split('\n').join('\n  ')}`);
-        }
-
-        // Show raw output if includeRawEvents is true
-        if (result.rawOutput) {
-          resultParts.push(`\n[Raw JSON Events - First 5 lines]`);
-          const lines = result.rawOutput.split('\n').filter(l => l.trim());
-          lines.slice(0, 5).forEach(line => {
-            resultParts.push(`  ${line}`);
-          });
-          if (lines.length > 5) {
-            resultParts.push(`  ... (${lines.length - 5} more lines)`);
-          }
-        }
-
-        resultParts.push(``);
-      } else {
-        resultParts.push(`${taskColor}━━━ Task: ${taskName} ━━━${RESET_COLOR}`);
-        resultParts.push(`Status: ✗ Failed`);
-        if (result.error) {
-          resultParts.push(`Error:`);
-          resultParts.push(`  ${result.error.split('\n').join('\n  ')}`);
-        }
-        if (result.stderr) {
-          resultParts.push(`Stderr:`);
-          resultParts.push(`  ${result.stderr.trim().split('\n').slice(0, 10).join('\n  ')}`);
-        }
-        if (result.rawOutput) {
-          resultParts.push(`Output:`);
-          resultParts.push(`  ${result.rawOutput.trim().split('\n').slice(0, 10).join('\n  ')}`);
-        }
-        resultParts.push(``);
-      }
-    }
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: resultParts.join("\n")
-        } satisfies TextContent
-      ]
-    };
+    return summaryResponse("codex", parsed.concurrency, results);
   } else if (toolName === GEMINI_TOOL) {
     const parsed = GeminiInvokeSchema.parse(args);
     const results = await runGeminiBatch(parsed);
@@ -294,67 +297,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   } else if (toolName === GROK_TOOL) {
     const parsed = GrokInvokeSchema.parse(args);
     const results = await runGrokBatch(parsed);
-
-    // Format results as clean text
-    const resultParts: string[] = [];
-
-    resultParts.push(`=== Grok Agent Execution ===`);
-    resultParts.push(`Concurrency: ${parsed.concurrency}`);
-    resultParts.push(``);
-
-    for (let i = 0; i < results.length; i++) {
-      const result = results[i];
-      const taskColor = TASK_COLORS[i % TASK_COLORS.length];
-      const taskName = result.agent || `Task-${i + 1}`;
-
-      if (result.status === "ok") {
-        resultParts.push(`${taskColor}━━━ Task: ${taskName} ━━━${RESET_COLOR}`);
-        resultParts.push(`Status: ✓ Success (${result.durationMs}ms)`);
-        resultParts.push(`Response:`);
-        if (result.response) {
-          resultParts.push(`  ${result.response.split('\n').join('\n  ')}`);
-        }
-
-        // Show raw output if includeRawEvents is true
-        if (result.rawOutput) {
-          resultParts.push(`\n[Raw JSON Events - First 5 lines]`);
-          const lines = result.rawOutput.split('\n').filter(l => l.trim());
-          lines.slice(0, 5).forEach(line => {
-            resultParts.push(`  ${line}`);
-          });
-          if (lines.length > 5) {
-            resultParts.push(`  ... (${lines.length - 5} more lines)`);
-          }
-        }
-
-        resultParts.push(``);
-      } else {
-        resultParts.push(`${taskColor}━━━ Task: ${taskName} ━━━${RESET_COLOR}`);
-        resultParts.push(`Status: ✗ Failed`);
-        if (result.error) {
-          resultParts.push(`Error:`);
-          resultParts.push(`  ${result.error.split('\n').join('\n  ')}`);
-        }
-        if (result.stderr) {
-          resultParts.push(`Stderr:`);
-          resultParts.push(`  ${result.stderr.trim().split('\n').slice(0, 10).join('\n  ')}`);
-        }
-        if (result.rawOutput) {
-          resultParts.push(`Output:`);
-          resultParts.push(`  ${result.rawOutput.trim().split('\n').slice(0, 10).join('\n  ')}`);
-        }
-        resultParts.push(``);
-      }
-    }
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: resultParts.join("\n")
-        } satisfies TextContent
-      ]
-    };
+    return summaryResponse("grok", parsed.concurrency, results);
   } else if (toolName === DEEPSEEK_TOOL) {
     const parsed = DeepSeekInvokeSchema.parse(args);
     const results = await runDeepSeekBatch(parsed);
@@ -484,6 +427,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         successCount++;
         resultParts.push(`${taskColor}━━━ [${input.provider.toUpperCase()}] ${taskName} ━━━${RESET_COLOR}`);
         resultParts.push(`Status: ✓ Success (${result.durationMs}ms)`);
+        resultParts.push(...detailLines(result));
         resultParts.push(`Response:`);
         if (result.response) {
           resultParts.push(`  ${result.response.split('\n').join('\n  ')}`);
@@ -493,6 +437,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         errorCount++;
         resultParts.push(`${taskColor}━━━ [${input.provider.toUpperCase()}] ${taskName} ━━━${RESET_COLOR}`);
         resultParts.push(`Status: ✗ Failed`);
+        resultParts.push(...detailLines(result));
         if (result.error) {
           resultParts.push(`Error:`);
           resultParts.push(`  ${result.error.split('\n').join('\n  ')}`);
@@ -537,6 +482,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (result.status === "ok") {
         resultParts.push(`${taskColor}━━━ Step ${i + 1}: [${step.provider.toUpperCase()}] ${stepLabel} ━━━${RESET_COLOR}`);
         resultParts.push(`Status: ✓ Success (${result.durationMs}ms)`);
+        resultParts.push(...detailLines(result));
         resultParts.push(`Response:`);
         if (result.response) {
           resultParts.push(`  ${result.response.split('\n').join('\n  ')}`);
@@ -545,6 +491,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } else {
         resultParts.push(`${taskColor}━━━ Step ${i + 1}: [${step.provider.toUpperCase()}] ${stepLabel} ━━━${RESET_COLOR}`);
         resultParts.push(`Status: ✗ Failed`);
+        resultParts.push(...detailLines(result));
         if (result.error) {
           resultParts.push(`Error:`);
           resultParts.push(`  ${result.error.split('\n').join('\n  ')}`);

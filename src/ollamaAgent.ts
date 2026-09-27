@@ -1,4 +1,5 @@
 import { probeFleet, route, type TaskClass } from "./fleet.js";
+import { OLLAMA_DEFAULT_MODEL } from "./modelDefaults.js";
 
 /**
  * Ollama Agent - Local LLM inference via Ollama API
@@ -51,7 +52,7 @@ export class OllamaInvocationError extends Error {
 }
 
 const DEFAULT_HOST = "http://192.168.1.100:11434";
-const DEFAULT_MODEL = "qwen3:30b-a3b";
+const DEFAULT_MODEL = OLLAMA_DEFAULT_MODEL;
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes (local models are fast)
 const DEFAULT_KEEP_ALIVE: string | number = "5m";
 

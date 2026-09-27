@@ -1,8 +1,10 @@
-import { BatchInvokeInput, AgentInvocationResult, AgentPromptInput, OllamaInvokeSchema, DeepSeekInvokeSchema } from "./types.js";
-import { invokeCodex, CodexInvocationError } from "./codexAgent.js";
+import { BatchInvokeInput, AgentInvocationResult, AgentPromptInput, OllamaInvokeSchema, DeepSeekInvokeSchema, ProviderRunDetails } from "./types.js";
+import { invokeCodex, CodexInvocationError, CodexInvocationResponse } from "./codexAgent.js";
+import { DEEPSEEK_DEFAULT_MODEL, OLLAMA_DEFAULT_MODEL } from "./modelDefaults.js";
+import { tail } from "./trace.js";
 import { invokeGemini, GeminiInvocationError } from "./geminiAgent.js";
 import { invokeContinue, ContinueInvocationError } from "./continueAgent.js";
-import { invokeGrok, GrokInvocationError } from "./grokAgent.js";
+import { invokeGrok, GrokInvocationError, GrokInvocationResponse } from "./grokAgent.js";
 import { invokeOllama, OllamaInvocationError } from "./ollamaAgent.js";
 import { invokeDeepSeek, DeepSeekInvocationError } from "./deepseekAgent.js";
 import { getAgent } from "./agentLoader.js";
@@ -12,6 +14,51 @@ import { z } from "zod";
 import { MultiInvokeInput, ChainInvokeInput, MultiPromptInput, ChainStepInput } from "./types.js";
 import { withRetry } from "./retry.js";
 import { cacheKey, getCached, setCache } from "./cache.js";
+
+type TraceMode = "summary" | "full" | undefined;
+
+const EMPTY_FINAL_NOTE = "no agent_message in the event stream; see trace_path for the full trace";
+
+export function codexDetails(r: CodexInvocationResponse, trace: TraceMode): ProviderRunDetails {
+  return {
+    model: r.model,
+    usage: r.summary.usage as Record<string, number> | null,
+    ...(r.summary.usage ? {} : { usageNote: "no turn.completed usage event in the stream" }),
+    filesChanged: r.summary.filesChanged,
+    commands: r.summary.commands,
+    tracePath: r.tracePath,
+    ...(r.summary.finalMessage ? {} : { note: EMPTY_FINAL_NOTE }),
+    ...(trace === "full" ? { rawStdout: r.stdout, rawStderr: r.stderr } : {})
+  };
+}
+
+export function grokDetails(r: GrokInvocationResponse, trace: TraceMode): ProviderRunDetails {
+  return {
+    model: r.model,
+    usage: null,
+    usageNote: "grok CLI runs in plain output mode, which reports no token usage",
+    tracePath: r.tracePath,
+    ...(r.response ? {} : { note: "empty response; see trace_path" }),
+    ...(trace === "full" ? { rawStdout: r.stdout, rawStderr: r.stderr } : {})
+  };
+}
+
+/** Error facts: last provider error event, final 2,000 chars of stderr, trace path. */
+export function providerErrorDetails(error: CodexInvocationError | GrokInvocationError, trace: TraceMode): ProviderRunDetails {
+  const summary = error instanceof CodexInvocationError ? error.summary : undefined;
+  return {
+    model: error.model,
+    ...(summary ? { usage: summary.usage as Record<string, number> | null, filesChanged: summary.filesChanged, commands: summary.commands } : {}),
+    tracePath: error.tracePath,
+    errorKind: error.kind,
+    ...(summary?.lastError ? { lastErrorEvent: summary.lastError } : {}),
+    stderrTail: tail(error.stderr, 2000),
+    ...(trace === "full" ? { rawStdout: error.stdout, rawStderr: error.stderr } : {})
+  };
+}
+
+const isModelRejected = (error: unknown) =>
+  (error instanceof CodexInvocationError || error instanceof GrokInvocationError) && error.kind === "model_rejected";
 
 // Type for the base schema without agentEnv
 type BaseInvokeInput = z.infer<typeof import("./types.js").CodexInvokeSchema>;
@@ -78,16 +125,14 @@ export async function runCodexBatch(input: BaseInvokeInput): Promise<AgentInvoca
         agent: prompt.agent,
         prompt: prompt.prompt,
         tool: "codex",
-        response: result.assistantReply || result.stdout,
+        response: result.assistantReply,
         exitCode: result.exitCode,
         durationMs: result.durationMs,
-        rawEvents: undefined,
-        rawOutput: undefined,
-        stderr: undefined
+        details: codexDetails(result, prompt.trace)
       } satisfies AgentInvocationResult;
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
-      const fb = await tryOllamaFallback({
+      const fb = isModelRejected(error) ? null : await tryOllamaFallback({
         prompt: prompt.prompt,
         agentSystemPrompt,
         originalProvider: "codex",
@@ -105,8 +150,8 @@ export async function runCodexBatch(input: BaseInvokeInput): Promise<AgentInvoca
           tool: "codex",
           error: error.message,
           exitCode: error.exitCode,
-          rawOutput: error.stdout,
-          stderr: error.stderr
+          durationMs: error.durationMs,
+          details: providerErrorDetails(error, prompt.trace)
         } satisfies AgentInvocationResult;
       }
 
@@ -217,13 +262,11 @@ export async function runGrokBatch(input: BaseInvokeInput): Promise<AgentInvocat
         response: result.response,
         exitCode: result.exitCode,
         durationMs: result.durationMs,
-        rawEvents: undefined,
-        rawOutput: undefined,
-        stderr: undefined
+        details: grokDetails(result, prompt.trace)
       } satisfies AgentInvocationResult;
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
-      const fb = await tryOllamaFallback({
+      const fb = isModelRejected(error) ? null : await tryOllamaFallback({
         prompt: prompt.prompt,
         agentSystemPrompt,
         originalProvider: "grok",
@@ -241,8 +284,8 @@ export async function runGrokBatch(input: BaseInvokeInput): Promise<AgentInvocat
           tool: "grok",
           error: error.message,
           exitCode: error.exitCode,
-          rawOutput: error.stdout,
-          stderr: error.stderr
+          durationMs: error.durationMs,
+          details: providerErrorDetails(error, prompt.trace)
         } satisfies AgentInvocationResult;
       }
 
@@ -281,7 +324,7 @@ export async function runDeepSeekBatch(input: DeepSeekInvokeInput): Promise<Agen
 
       return {
         status: "ok",
-        agent: prompt.model || "deepseek-chat",
+        agent: prompt.model || DEEPSEEK_DEFAULT_MODEL,
         prompt: prompt.prompt,
         tool: "deepseek",
         response,
@@ -298,14 +341,14 @@ export async function runDeepSeekBatch(input: DeepSeekInvokeInput): Promise<Agen
         originalProvider: "deepseek",
         originalModel: prompt.model,
         originalError: errMsg,
-        agent: prompt.model || "deepseek-chat",
+        agent: prompt.model || DEEPSEEK_DEFAULT_MODEL,
         timeoutMs: prompt.timeoutMs,
       });
       if (fb) return fb;
       if (error instanceof DeepSeekInvocationError) {
         return {
           status: "error",
-          agent: prompt.model || "deepseek-chat",
+          agent: prompt.model || DEEPSEEK_DEFAULT_MODEL,
           prompt: prompt.prompt,
           tool: "deepseek",
           error: error.message,
@@ -317,7 +360,7 @@ export async function runDeepSeekBatch(input: DeepSeekInvokeInput): Promise<Agen
 
       return {
         status: "error",
-        agent: prompt.model || "deepseek-chat",
+        agent: prompt.model || DEEPSEEK_DEFAULT_MODEL,
         prompt: prompt.prompt,
         tool: "deepseek",
         error: errMsg
@@ -359,7 +402,7 @@ export async function runOllamaBatch(input: OllamaInvokeInput): Promise<AgentInv
       if (error instanceof OllamaInvocationError) {
         return {
           status: "error",
-          agent: prompt.model || "qwen3:30b-a3b",
+          agent: prompt.model || OLLAMA_DEFAULT_MODEL,
           prompt: prompt.prompt,
           tool: "ollama",
           error: error.message,
@@ -371,7 +414,7 @@ export async function runOllamaBatch(input: OllamaInvokeInput): Promise<AgentInv
 
       return {
         status: "error",
-        agent: prompt.model || "qwen3:30b-a3b",
+        agent: prompt.model || OLLAMA_DEFAULT_MODEL,
         prompt: prompt.prompt,
         tool: "ollama",
         error: error instanceof Error ? error.message : String(error)
@@ -464,11 +507,11 @@ async function invokeSingleTask(task: MultiPromptInput): Promise<AgentInvocation
     let exitCode = 0;
     let durationMs = 0;
 
-    const result = await withRetry(async () => {
+    const result: { response: string; exitCode: number; durationMs: number; details?: ProviderRunDetails } = await withRetry(async () => {
       switch (provider) {
         case "codex": {
           const r = await invokeCodex({ prompt, agentSystemPrompt, model, extraArgs, timeoutMs, workingDirectory });
-          return { response: r.assistantReply || r.stdout, exitCode: r.exitCode, durationMs: r.durationMs };
+          return { response: r.assistantReply, exitCode: r.exitCode, durationMs: r.durationMs, details: codexDetails(r, "summary") };
         }
         case "gemini": {
           const r = await invokeGemini({ prompt, agentSystemPrompt, model, timeoutMs, workingDirectory });
@@ -476,7 +519,7 @@ async function invokeSingleTask(task: MultiPromptInput): Promise<AgentInvocation
         }
         case "grok": {
           const r = await invokeGrok({ prompt, agentSystemPrompt, model, timeoutMs, workingDirectory });
-          return { response: r.response, exitCode: r.exitCode, durationMs: r.durationMs };
+          return { response: r.response, exitCode: r.exitCode, durationMs: r.durationMs, details: grokDetails(r, "summary") };
         }
         case "deepseek": {
           const r = await invokeDeepSeek({ prompt, agentSystemPrompt, model, timeoutMs });
@@ -507,9 +550,7 @@ async function invokeSingleTask(task: MultiPromptInput): Promise<AgentInvocation
       response,
       exitCode,
       durationMs,
-      rawEvents: undefined,
-      rawOutput: undefined,
-      stderr: undefined
+      ...(result.details ? { details: result.details } : {})
     };
 
     // Cache the result if requested
@@ -521,7 +562,7 @@ async function invokeSingleTask(task: MultiPromptInput): Promise<AgentInvocation
     return invocationResult;
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
-    if (provider !== "ollama") {
+    if (provider !== "ollama" && !isModelRejected(error)) {
       const fb = await tryOllamaFallback({
         prompt,
         agentSystemPrompt,
@@ -538,7 +579,10 @@ async function invokeSingleTask(task: MultiPromptInput): Promise<AgentInvocation
       agent: agent || `${provider}/${model || "default"}`,
       prompt,
       tool: provider,
-      error: errMsg
+      error: errMsg,
+      ...(error instanceof CodexInvocationError || error instanceof GrokInvocationError
+        ? { exitCode: error.exitCode, details: providerErrorDetails(error, "summary") }
+        : {})
     } as AgentInvocationResult;
   }
 }
