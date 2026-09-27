@@ -5,7 +5,7 @@ export const AgentIdentifierSchema = z.string().min(1).max(64);
 export const AgentPromptSchema = z.object({
   agent: z.string().optional().describe("Name of specialized agent to use (e.g., 'backend-architect', 'python-expert')"),
   prompt: z.string().min(1, "prompt must not be empty").describe("The prompt to send to the agent"),
-  model: z.string().optional().describe("Optional provider model ID. Omit it to use each subscription CLI's live default. Verified 2026-09-06: native Grok CLI 1.0.13 advertises grok-4.6 (default) and grok-4.5; Gemini CLI 0.58.0 default routing succeeded using current 3.x models. Never guess an unadvertised historical ID."),
+  model: z.string().optional().describe("Optional provider model ID. Grok defaults to grok-4.7 (operator selection, 2026-09-21); other CLI providers use their configured default when omitted. Explicit model IDs override these defaults and must be supported by the configured provider."),
   extraArgs: z.array(z.string()).optional().describe("Additional CLI arguments (Codex only)"),
   timeoutMs: z.number().int().positive().max(60 * 60 * 1000).optional().describe("Timeout in milliseconds (default: 30 min, max: 60 min)"),
   workingDirectory: z.string().optional().describe("Directory path where agent should run. Use this to access different projects")

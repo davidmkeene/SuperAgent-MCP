@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 export interface GrokInvocationOptions {
   prompt: string;
@@ -58,12 +60,8 @@ function buildArgs(options: GrokInvocationOptions): string[] {
   // Use headless mode with prompt flag
   args.push("-p", fullPrompt);
 
-  // Native subscription CLI 1.0.13 reported grok-4.6 (default) and grok-4.5 on
-  // 2026-09-06. Omit -m by default so a future CLI registry change does not turn
-  // a healthy subscription into an adapter failure.
-  if (options.model) {
-    args.push("-m", options.model);
-  }
+  // Operator-selected default (2026-09-21); explicit per-call models still win.
+  args.push("-m", options.model || "grok-4.7");
 
   // Auto-approve mode (similar to Gemini's YOLO mode)
   // The Grok CLI uses interactive mode by default, -p puts it in headless mode
@@ -113,12 +111,15 @@ export async function invokeGrok(options: GrokInvocationOptions): Promise<GrokIn
   const args = buildArgs(options);
   const start = Date.now();
 
-  // Use full path to grok CLI wrapper to ensure it's found regardless of PATH
-  // Falls back to system grok if wrapper not found
-  const grokPath = process.env.GROK_PATH || "/usr/local/bin/grok";
+  // Native Grok Build with the existing grok.com subscription login.
+  const grokPath = process.env.GROK_PATH || join(homedir(), ".grok", "bin", "grok");
+  const grokEnv = { ...process.env };
+  // API keys take precedence over OAuth; never inherit them into this lane.
+  delete grokEnv.XAI_API_KEY;
+  delete grokEnv.GROK_API_KEY;
   const child = spawn(grokPath, args, {
     cwd: options.workingDirectory ?? process.cwd(),
-    env: process.env,
+    env: grokEnv,
     stdio: ["pipe", "pipe", "pipe"]
   });
 

@@ -68,7 +68,7 @@ function createToolDefinitions(): { codex: Tool, gemini: Tool, continue: Tool, g
     },
     grok: {
       name: GROK_TOOL,
-      description: "Run the native Grok subscription CLI with parallel execution and an auditable tool trace. Model omitted uses the CLI default. Live `grok models` verification on 2026-09-06 with CLI 1.0.13 reported grok-4.6 (default) and grok-4.5; other historical IDs are not advertised and must not be guessed.",
+      description: "Run native Grok Build using the existing grok.com subscription login. Inherited XAI_API_KEY and GROK_API_KEY are removed from the child environment. Model omitted selects grok-4.7; an explicit model overrides it. Returns CLI stdout/stderr; no structured tool trace is promised.",
       inputSchema: zodToJsonSchema(GrokInvokeSchema) as Tool["inputSchema"]
     },
     deepseek: {
