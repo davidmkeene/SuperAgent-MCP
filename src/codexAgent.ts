@@ -95,11 +95,77 @@ function collectFromMsg(msg: Record<string, unknown>, replies: string[]): void {
   }
 }
 
-function parseAssistantReply(events: CodexInvocationEvent[]): string {
+/**
+ * doc-914 (round 2 review, item 9): "turn.failed/error event text is
+ * dropped; a failed turn returns the placeholder or 'Codex exited with
+ * code N' with no reason." Real shape (captured live, codex-cli 0.157.0,
+ * an unsupported --model): `{"type":"turn.failed","error":{"message":...}}`,
+ * preceded by a top-level `{"type":"error","message":...}` and often an
+ * `item.completed` with `item.type==="error"`. Prefer turn.failed's own
+ * error (the authoritative "why the turn ended" event), then the top-level
+ * error event, then an error-typed item -- returns undefined (not "") when
+ * none of the three is present, so a caller can tell "no reason found" from
+ * "found an empty reason".
+ */
+export function parseFailureReason(events: CodexInvocationEvent[]): string | undefined {
+  let topLevelError: string | undefined;
+  let errorItem: string | undefined;
+  for (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    if (event["type"] === "turn.failed") {
+      const err = event["error"];
+      if (err && typeof err === "object" && typeof (err as Record<string, unknown>)["message"] === "string") {
+        return (err as Record<string, unknown>)["message"] as string;
+      }
+    }
+    if (event["type"] === "error" && typeof event["message"] === "string" && !topLevelError) {
+      topLevelError = event["message"] as string;
+    }
+    if (event["type"] === "item.completed") {
+      const item = event["item"];
+      if (item && typeof item === "object") {
+        const itemObj = item as Record<string, unknown>;
+        if (itemObj["type"] === "error" && typeof itemObj["message"] === "string" && !errorItem) {
+          errorItem = itemObj["message"] as string;
+        }
+      }
+    }
+  }
+  return topLevelError ?? errorItem;
+}
+
+export function parseAssistantReply(events: CodexInvocationEvent[]): string {
   const replies: string[] = [];
+  // doc-914 #7 (round 2 independent review): codex-cli 0.157.0 emits
+  // `{"type":"item.completed","item":{"type":"agent_message","text":...}}`
+  // instead of the legacy `{msg:{type:"agent_message", message: ...}}`
+  // shape below -- the parser never recognised it at all, so
+  // `assistantReply` was ALWAYS empty against a current CLI, and every
+  // caller fell back to `result.stdout`: the FULL raw trace (72k-441k
+  // characters, three times in one session per doc 914), which blew past
+  // the MCP transport's own result-size limit. A turn can emit several
+  // item.completed agent_message events (progress notes, then a final
+  // summary) -- keep only the LAST one: "the final message", per doc 914's
+  // own fix request ("return only the final message from the lane"), not a
+  // concatenation of everything said along the way.
+  let lastItemMessage: string | undefined;
 
   for (const event of events) {
     if (!event || typeof event !== "object") {
+      continue;
+    }
+
+    if (event["type"] === "item.completed") {
+      const item = event["item"];
+      if (item && typeof item === "object") {
+        const itemObj = item as Record<string, unknown>;
+        if (itemObj["type"] === "agent_message" && typeof itemObj["text"] === "string") {
+          const text = (itemObj["text"] as string).trim();
+          if (text.length > 0) {
+            lastItemMessage = text;
+          }
+        }
+      }
       continue;
     }
 
@@ -128,10 +194,16 @@ function parseAssistantReply(events: CodexInvocationEvent[]): string {
     }
   }
 
+  // The modern shape wins when present: it is what any current codex-cli
+  // actually emits. The legacy join is the fallback for an older CLI whose
+  // events never had `item.completed` at all.
+  if (lastItemMessage !== undefined) {
+    return lastItemMessage;
+  }
   return replies.join("\n").trim();
 }
 
-function parseJsonLines(stdout: string): CodexInvocationEvent[] {
+export function parseJsonLines(stdout: string): CodexInvocationEvent[] {
   const lines = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   const events: CodexInvocationEvent[] = [];
 
@@ -213,8 +285,14 @@ export async function invokeCodex(options: CodexInvocationOptions): Promise<Code
   const exitCode = closeResult[0] ?? 0;
 
   if (exitCode !== 0) {
+    // doc-914 (round 2 review, item 9): a failed turn's own reason (from
+    // turn.failed/error events in the JSON stream) must reach the caller,
+    // not just a bare exit code.
+    const failureReason = parseFailureReason(parseJsonLines(stdout));
     throw new CodexInvocationError(
-      `Codex exited with code ${exitCode}`,
+      failureReason
+        ? `Codex exited with code ${exitCode}: ${failureReason}`
+        : `Codex exited with code ${exitCode}`,
       exitCode,
       stdout,
       stderr

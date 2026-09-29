@@ -8,7 +8,7 @@ import {
   TextContent
 } from "@modelcontextprotocol/sdk/types.js";
 import { CodexInvokeSchema, GeminiInvokeSchema, ContinueInvokeSchema } from "./types.js";
-import { runCodexBatch, runGeminiBatch, runContinueBatch } from "./runner.js";
+import { runCodexBatch, runGeminiBatch, runContinueBatch, cleanupOldTraces } from "./runner.js";
 import { formatAgentsForDescription, ensureAgentsDirectory, loadAgents } from "./agentLoader.js";
 import { setupSignalHandlers } from "./processManager.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -300,6 +300,11 @@ async function main() {
 
   // Ensure agents directory exists
   ensureAgentsDirectory();
+
+  // doc-914 (round 2 review, item 9): trace files are write-once debugging
+  // artifacts under a per-user cache directory with no other rotation --
+  // sweep anything older than 7 days once per process start.
+  cleanupOldTraces();
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
