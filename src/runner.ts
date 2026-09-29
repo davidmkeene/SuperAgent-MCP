@@ -552,7 +552,14 @@ async function invokeSingleTask(task: MultiPromptInput): Promise<AgentInvocation
       switch (provider) {
         case "codex": {
           const r = await invokeCodex({ prompt, agentSystemPrompt, model, extraArgs, timeoutMs, workingDirectory });
-          return { response: r.assistantReply || r.stdout, exitCode: r.exitCode, durationMs: r.durationMs };
+          // doc-914 (round 2 review, item 10): a THIRD uncapped fallback,
+          // only on this live install branch (runMultiBatch/runChain via
+          // invokeSingleTask) -- `r.assistantReply || r.stdout` had the
+          // exact same bug as runCodexBatch/runBatch's fallbacks (the raw
+          // trace inlined whenever assistantReply was empty), which the
+          // upstream fix never touched because this call site does not
+          // exist upstream at all.
+          return { response: persistTraceAndCapResponse("codex", r.assistantReply, r.stdout), exitCode: r.exitCode, durationMs: r.durationMs };
         }
         case "gemini": {
           const r = await invokeGemini({ prompt, agentSystemPrompt, model, timeoutMs, workingDirectory });
