@@ -8,7 +8,7 @@ import {
   TextContent
 } from "@modelcontextprotocol/sdk/types.js";
 import { CodexInvokeSchema, GeminiInvokeSchema, ContinueInvokeSchema, GrokInvokeSchema, DeepSeekInvokeSchema, OllamaInvokeSchema, MultiInvokeSchema, ChainInvokeSchema } from "./types.js";
-import { runCodexBatch, runGeminiBatch, runContinueBatch, runGrokBatch, runDeepSeekBatch, runOllamaBatch, runMultiBatch, runChain } from "./runner.js";
+import { runCodexBatch, runGeminiBatch, runContinueBatch, runGrokBatch, runDeepSeekBatch, runOllamaBatch, runMultiBatch, runChain, cleanupOldTraces } from "./runner.js";
 import { formatAgentsForDescription, ensureAgentsDirectory, loadAgents } from "./agentLoader.js";
 import { setupSignalHandlers } from "./processManager.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -78,7 +78,7 @@ function createToolDefinitions(): { codex: Tool, gemini: Tool, continue: Tool, g
     },
     ollama: {
       name: OLLAMA_TOOL,
-      description: "Run text-only local Ollama inference across RE-Orch-01, RE-Orch-02, and NAS. Supply a task class and omit host/model to use health-checked fleet routing. Context defaults to 16384 to avoid RAM spill. This adapter cannot execute tools or inspect files; use it for drafting, summarizing, classifying, embeddings, and text supplied in the prompt. Load canonical RAG entry 3ff6a0a1 (local-compute roster v2, 2026-09-03) for current model guidance. For real tool loops use mcp__ollama-local__ollama_chat (accepts tools[]) or curl the host directly.",
+      description: "Text-only chat to the local Ollama fleet (RE-Orch-01, RE-Orch-02, NAS). Supply a task class and omit host/model for health-checked fleet routing. Context defaults to 16384 to avoid RAM spill. This wrapper does not pass tools — that is a limit of this adapter, not the models. Qwen executes tools via: mandated tracked lane `REO/scripts/reo-local-digest.sh --tools --exec` or mcp__ollama-local__ollama_chat with tools[]. Use this wrapper for drafting, summarizing, classifying, embeddings. Load RAG entry 3ff6a0a1 (local-compute roster v2, 2026-09-03) for model guidance.",
       inputSchema: zodToJsonSchema(OllamaInvokeSchema) as Tool["inputSchema"]
     },
     multi: {
@@ -594,6 +594,11 @@ async function main() {
 
   // Ensure agents directory exists
   ensureAgentsDirectory();
+
+  // doc-914 (round 2 review, item 9): trace files are write-once debugging
+  // artifacts under a per-user cache directory with no other rotation --
+  // sweep anything older than 7 days once per process start.
+  cleanupOldTraces();
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

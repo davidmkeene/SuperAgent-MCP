@@ -136,7 +136,7 @@ export interface FleetModel {
 export const MODELS: FleetModel[] = [
   // ---- orch01 only (need real VRAM) ----
   { name: "nemotron-3.5-lightning:30b-a3b-q4_K_M", sizeGB: 18.6, hosts: ["orch01", "orch02"], tools: true, toolsVerified: true, good: ["agentic", "reason"] },
-  { name: "qwen3.8:27b",                       sizeGB: 17.0, hosts: ["orch01"], tools: true, toolsVerified: true, good: ["agentic", "reason", "summarize"] },
+  { name: "qwen3.8:27b",                       sizeGB: 17.0, hosts: ["orch01"], tools: true, toolsVerified: true, good: ["agentic", "reason", "summarize", "draft"] },
   { name: "qwen2.5:72b",                      sizeGB: 47.4, hosts: ["orch01"], tools: true,  good: ["reason"] },
   { name: "llama3.1:70b",                     sizeGB: 42.5, hosts: ["orch01"], tools: true,  good: ["reason"] },
   // NOTE: coder:32b advertises tools but does NOT emit structured tool_calls — see
@@ -149,7 +149,7 @@ export const MODELS: FleetModel[] = [
   { name: "deepseek-coder-v2:16b",            sizeGB: 8.9,  hosts: ["orch01"], tools: false, good: ["code-review", "draft"] },
 
   // ---- small, spread across boxes ----
-  { name: "qwen3:8b",                         sizeGB: 5.2,  hosts: ["orch01", "orch02"], tools: true,  toolsVerified: true, good: ["agentic", "reason", "summarize"] },
+  { name: "qwen3:8b",                         sizeGB: 5.2,  hosts: ["orch01", "orch02"], tools: true,  toolsVerified: true, good: ["agentic", "reason", "summarize", "draft"] },
   { name: "qwen2.5:14b",                      sizeGB: 9.0,  hosts: ["nas", "orch02"], tools: true, good: ["summarize", "reason", "classify"] },
   { name: "qwen2.5-coder:7b",                 sizeGB: 4.7,  hosts: ["nas", "orch02"], tools: true, good: ["draft", "classify"] },
 
