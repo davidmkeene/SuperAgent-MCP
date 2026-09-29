@@ -95,11 +95,38 @@ function collectFromMsg(msg: Record<string, unknown>, replies: string[]): void {
   }
 }
 
-function parseAssistantReply(events: CodexInvocationEvent[]): string {
+export function parseAssistantReply(events: CodexInvocationEvent[]): string {
   const replies: string[] = [];
+  // doc-914 #7 (round 2 independent review): codex-cli 0.157.0 emits
+  // `{"type":"item.completed","item":{"type":"agent_message","text":...}}`
+  // instead of the legacy `{msg:{type:"agent_message", message: ...}}`
+  // shape below -- the parser never recognised it at all, so
+  // `assistantReply` was ALWAYS empty against a current CLI, and every
+  // caller fell back to `result.stdout`: the FULL raw trace (72k-441k
+  // characters, three times in one session per doc 914), which blew past
+  // the MCP transport's own result-size limit. A turn can emit several
+  // item.completed agent_message events (progress notes, then a final
+  // summary) -- keep only the LAST one: "the final message", per doc 914's
+  // own fix request ("return only the final message from the lane"), not a
+  // concatenation of everything said along the way.
+  let lastItemMessage: string | undefined;
 
   for (const event of events) {
     if (!event || typeof event !== "object") {
+      continue;
+    }
+
+    if (event["type"] === "item.completed") {
+      const item = event["item"];
+      if (item && typeof item === "object") {
+        const itemObj = item as Record<string, unknown>;
+        if (itemObj["type"] === "agent_message" && typeof itemObj["text"] === "string") {
+          const text = (itemObj["text"] as string).trim();
+          if (text.length > 0) {
+            lastItemMessage = text;
+          }
+        }
+      }
       continue;
     }
 
@@ -128,10 +155,16 @@ function parseAssistantReply(events: CodexInvocationEvent[]): string {
     }
   }
 
+  // The modern shape wins when present: it is what any current codex-cli
+  // actually emits. The legacy join is the fallback for an older CLI whose
+  // events never had `item.completed` at all.
+  if (lastItemMessage !== undefined) {
+    return lastItemMessage;
+  }
   return replies.join("\n").trim();
 }
 
-function parseJsonLines(stdout: string): CodexInvocationEvent[] {
+export function parseJsonLines(stdout: string): CodexInvocationEvent[] {
   const lines = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   const events: CodexInvocationEvent[] = [];
 

@@ -1,3 +1,6 @@
+import * as nodeFsForTrace from "node:fs";
+import * as nodePathForTrace from "node:path";
+import * as nodeOsForTrace from "node:os";
 import { BatchInvokeInput, AgentInvocationResult, AgentPromptInput } from "./types.js";
 import { invokeCodex, CodexInvocationError } from "./codexAgent.js";
 import { invokeGemini, GeminiInvocationError } from "./geminiAgent.js";
@@ -7,6 +10,50 @@ import { z } from "zod";
 
 // Type for the base schema without agentEnv
 type BaseInvokeInput = z.infer<typeof import("./types.js").CodexInvokeSchema>;
+
+// doc-914 #7 (round 2 independent review): a codex call used to return the
+// ENTIRE raw stdout trace (72k-441k characters, seen 3x in one session)
+// whenever the parsed assistantReply came back empty -- `result.assistantReply
+// || result.stdout` fell all the way back to the raw trace, which blew past
+// the MCP transport's own result-size limit and forced a caller to grep a
+// manually-saved trace file instead. codexAgent.ts's parser fix (item.completed
+// support) means assistantReply is now populated whenever codex actually said
+// anything, so this fallback should rarely trigger for a real reply -- but it
+// still must never dump the raw trace inline for the cases that remain (a
+// turn that genuinely never emitted an agent_message, e.g. a bare tool-call
+// turn). ALWAYS persist the full trace to disk, and NEVER return more than
+// MAX_RESPONSE_CHARS inline -- the final message plus a path, not the trace.
+const MAX_RESPONSE_CHARS = 8000;
+const TRACE_DIR = process.env.SUPERAGENT_TRACE_DIR
+  || nodePathForTrace.join(nodeOsForTrace.tmpdir(), "superagent-traces");
+
+export function persistTraceAndCapResponse(
+  toolName: string, assistantReply: string, fullStdout: string
+): string {
+  let tracePath: string | undefined;
+  try {
+    nodeFsForTrace.mkdirSync(TRACE_DIR, { recursive: true });
+    tracePath = nodePathForTrace.join(
+      TRACE_DIR,
+      `${toolName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.log`);
+    nodeFsForTrace.writeFileSync(tracePath, fullStdout, "utf8");
+  } catch {
+    // Trace persistence is best-effort: a disk/permission failure here must
+    // never turn into "return the trace inline instead", or the original
+    // bug comes right back under the one condition (no disk) it's worst.
+    tracePath = undefined;
+  }
+  const base = (assistantReply && assistantReply.trim())
+    || "(codex produced no parsed final message; see the full trace file)";
+  const traceNote = tracePath
+    ? ` [full trace: ${fullStdout.length} chars written to ${tracePath}]`
+    : ` [full trace: ${fullStdout.length} chars, NOT persisted -- trace dir unwritable]`;
+  const budget = Math.max(0, MAX_RESPONSE_CHARS - traceNote.length);
+  const capped = base.length > budget
+    ? base.slice(0, budget) + "... [truncated]"
+    : base;
+  return capped + traceNote;
+}
 
 async function runWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
@@ -69,7 +116,7 @@ export async function runCodexBatch(input: BaseInvokeInput): Promise<AgentInvoca
         agent: prompt.agent,
         prompt: prompt.prompt,
         tool: "codex",
-        response: result.assistantReply || result.stdout,
+        response: persistTraceAndCapResponse("codex", result.assistantReply, result.stdout),
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         rawEvents: undefined,
@@ -254,8 +301,17 @@ export async function runBatch(input: BatchInvokeInput): Promise<AgentInvocation
 
     try {
       const result = await agent.run() as any;  // Type workaround for different response types
-      // Handle different response types
-      const response = result.response || result.assistantReply || result.stdout;
+      // Handle different response types. `result.response` covers gemini/
+      // continue (never large enough to need trace-capping observed so
+      // far); the codex path has no `.response` field at all, only
+      // assistantReply/stdout -- doc-914 #7 (round 2 review): this is
+      // runner.ts's SECOND fallback site with the exact same bug as
+      // runCodexBatch's (`result.assistantReply || result.stdout`, without
+      // ever capping the raw trace), reached via the legacy resolveAgent/
+      // runBatch path rather than runCodexBatch.
+      const response = result.response !== undefined
+        ? result.response
+        : persistTraceAndCapResponse(agent.agentName, result.assistantReply, result.stdout);
       const rawEvents = input.includeRawEvents ?
                        (result.stats || result.parsedEvents) : undefined;
 
