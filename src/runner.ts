@@ -29,20 +29,59 @@ type BaseInvokeInput = z.infer<typeof import("./types.js").CodexInvokeSchema>;
 // anything, so this fallback should rarely trigger for a real reply -- but it
 // still must never dump the raw trace inline for the cases that remain (a
 // turn that genuinely never emitted an agent_message, e.g. a bare tool-call
-// turn). ALWAYS persist the full trace to disk, and NEVER return more than
-// MAX_RESPONSE_CHARS inline -- the final message plus a path, not the trace.
+// turn). NEVER return more than MAX_RESPONSE_CHARS inline -- the final
+// message plus a path, not the trace.
 const MAX_RESPONSE_CHARS = 8000;
+const TRACE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// A real per-user cache directory (~/.cache/superagent/traces), not a
+// worker-round-robin tmpdir path that can be cleared by the OS at any time
+// -- overridable for tests/operators via SUPERAGENT_TRACE_DIR.
 const TRACE_DIR = process.env.SUPERAGENT_TRACE_DIR
-  || nodePathForTrace.join(nodeOsForTrace.tmpdir(), "superagent-traces");
+  || nodePathForTrace.join(nodeOsForTrace.homedir(), ".cache", "superagent", "traces");
+
+/**
+ * Delete trace files older than TRACE_MAX_AGE_MS. Call once at server
+ * start-up (src/server.ts's main()) -- traces are write-once debugging
+ * artifacts, not a log a caller ever needs to keep past a week, and nothing
+ * else on this host rotates them.
+ */
+export function cleanupOldTraces(now: number = Date.now(), dir: string = TRACE_DIR): void {
+  let entries: string[];
+  try {
+    entries = nodeFsForTrace.readdirSync(dir);
+  } catch {
+    return; // directory does not exist yet -- nothing to clean up
+  }
+  for (const name of entries) {
+    const full = nodePathForTrace.join(dir, name);
+    try {
+      const stat = nodeFsForTrace.statSync(full);
+      if (stat.isFile() && now - stat.mtimeMs > TRACE_MAX_AGE_MS) {
+        nodeFsForTrace.unlinkSync(full);
+      }
+    } catch {
+      // Best-effort: one unreadable/racing file must not stop the sweep.
+    }
+  }
+}
 
 export function persistTraceAndCapResponse(
-  toolName: string, assistantReply: string, fullStdout: string
+  toolName: string, assistantReply: string, fullStdout: string, traceDir: string = TRACE_DIR
 ): string {
+  const base = (assistantReply && assistantReply.trim())
+    || "(codex produced no parsed final message; see the full trace file)";
+  // doc-914 (round 2 review, item 9): a trace file is only worth writing
+  // when the raw trace would not have fit inline anyway -- a short reply
+  // from a short trace needs no on-disk artifact, and every call used to
+  // write one regardless of size.
+  if (fullStdout.length <= MAX_RESPONSE_CHARS && base.length <= MAX_RESPONSE_CHARS) {
+    return base;
+  }
   let tracePath: string | undefined;
   try {
-    nodeFsForTrace.mkdirSync(TRACE_DIR, { recursive: true });
+    nodeFsForTrace.mkdirSync(traceDir, { recursive: true });
     tracePath = nodePathForTrace.join(
-      TRACE_DIR,
+      traceDir,
       `${toolName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.log`);
     nodeFsForTrace.writeFileSync(tracePath, fullStdout, "utf8");
   } catch {
@@ -51,8 +90,6 @@ export function persistTraceAndCapResponse(
     // bug comes right back under the one condition (no disk) it's worst.
     tracePath = undefined;
   }
-  const base = (assistantReply && assistantReply.trim())
-    || "(codex produced no parsed final message; see the full trace file)";
   const traceNote = tracePath
     ? ` [full trace: ${fullStdout.length} chars written to ${tracePath}]`
     : ` [full trace: ${fullStdout.length} chars, NOT persisted -- trace dir unwritable]`;

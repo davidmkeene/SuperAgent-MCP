@@ -12,7 +12,7 @@
     "start": "node dist/server.js",
     "dev": "ts-node src/server.ts",
     "postinstall": "node scripts/postinstall.js",
-    "test": "npm run build && node --test tests/"
+    "test": "npm run build && node --experimental-test-module-mocks --test tests/"
   },
   "files": [
     "dist/",

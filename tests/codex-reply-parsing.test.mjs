@@ -64,3 +64,31 @@ test("a mix of unrelated event types alongside item.completed does not corrupt t
   const events = parseJsonLines(stream);
   assert.equal(parseAssistantReply(events), "final answer");
 });
+
+// doc-914 (round 2 review, item 9): "turn.failed/error event text is
+// dropped; a failed turn returns the placeholder or 'Codex exited with
+// code N' with no reason." parseFailureReason extracts the REAL reason
+// from a real captured codex-cli failure stream (an unsupported --model,
+// captured live, codex-cli 0.157.0).
+import { parseFailureReason } from "../dist/codexAgent.js";
+
+test("a real turn.failed stream's error message is extracted, not dropped", () => {
+  const events = loadEvents("codex-turn-failed.jsonl");
+  const reason = parseFailureReason(events);
+  assert.ok(reason, "a failure reason must be found");
+  assert.match(reason, /nonexistent-model-xyz/);
+});
+
+test("a successful stream (no turn.failed/error) has no failure reason", () => {
+  const events = loadEvents("codex-small-success.jsonl");
+  assert.equal(parseFailureReason(events), undefined);
+});
+
+test("turn.failed's own error is preferred over a top-level error event", () => {
+  const stream = [
+    { type: "error", message: "top-level, should not win" },
+    { type: "turn.failed", error: { message: "the real reason" } },
+  ].map((e) => JSON.stringify(e)).join("\n");
+  const events = parseJsonLines(stream);
+  assert.equal(parseFailureReason(events), "the real reason");
+});
